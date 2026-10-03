@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 import json
 import argparse
+import csv
+import matplotlib.cm as cm
+import matplotlib.lines as mlines
 import random
 import glob
 import sys
 import math
-import sqlite3
 import io
 from PIL import Image
 import matplotlib
@@ -95,65 +97,7 @@ def create_polygon_patch(coords, facecolor, edgecolor, linewidth, alpha, zorder=
     patch = PathPatch(path, facecolor=facecolor, edgecolor=edgecolor, linewidth=linewidth, alpha=alpha, zorder=zorder)
     return patch, path
 
-def plot_mbtiles(db_path, view_bbox, ax):
-    min_lon, min_lat, max_lon, max_lat = view_bbox
-    conn = sqlite3.connect(db_path)
-    c = conn.cursor()
-    c.execute("SELECT MIN(zoom_level), MAX(zoom_level) FROM tiles")
-    row = c.fetchone()
-    if not row or row[0] is None:
-        print(f"No tiles found in {db_path}")
-        return
-    min_z, max_z = row
-    
-    lon_span = max_lon - min_lon
-    target_tiles = 4.0
-    if lon_span <= 0:
-        z = max_z
-    else:
-        z = int(round(math.log2(360.0 * target_tiles / lon_span)))
-    # Try to zoom in one level for better resolution, but safely clamp to what the DB actually has
-    z = max(min_z, min(z + 1, max_z))
-    print(f"Using zoom level {z} for MBTiles.")
-    
-    def deg2num(lat_deg, lon_deg, zoom):
-        lat_rad = math.radians(lat_deg)
-        n = 2.0 ** zoom
-        xtile = int((lon_deg + 180.0) / 360.0 * n)
-        ytile = int((1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n)
-        return (xtile, ytile)
-        
-    def num2merc(xtile, ytile, zoom):
-        n = 2.0 ** zoom
-        tile_size = 2.0 * MERCATOR_MAX / n
-        x = -MERCATOR_MAX + xtile * tile_size
-        y = MERCATOR_MAX - ytile * tile_size
-        return x, y
-    
-    xmin, ymin = deg2num(max_lat, min_lon, z)
-    xmax, ymax = deg2num(min_lat, max_lon, z)
-    if xmax < xmin:
-        xmax += 2**z
 
-    tiles_drawn = 0
-    for x in range(xmin, xmax + 1):
-        for y in range(ymin, ymax + 1):
-            wrapped_x = x % (2**z)
-            tms_y = (2**z - 1) - y
-            c.execute("SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?", (z, wrapped_x, tms_y))
-            res = c.fetchone()
-            if res:
-                img = Image.open(io.BytesIO(res[0]))
-                if img.mode != 'RGB':
-                    img = img.convert('RGB')
-                x_left, y_top = num2merc(x, y, z)
-                _, y_bot = num2merc(x, y+1, z)
-                x_right, _ = num2merc(x+1, y, z)
-                ax.imshow(img, extent=[x_left, x_right, y_bot, y_top], origin='upper', alpha=1.0, zorder=0)
-                tiles_drawn += 1
-    
-    conn.close()
-    print(f"Drawn {tiles_drawn} raster tiles from MBTiles.")
 
 def plot_geojson_layer(geojson_path, view_bbox, ax, args, merc_bounds, layer_type="land"):
     merc_min_x, merc_min_y, merc_max_x, merc_max_y = merc_bounds
@@ -455,7 +399,7 @@ def plot_geojson_layer(geojson_path, view_bbox, ax, args, merc_bounds, layer_typ
     except Exception as e:
         print(f"Error reading or plotting geojson: {e}")
 
-def plot_map(points, geojson_path, mbtiles_path, args):
+def plot_map(points, geojson_path, args, group_colors=None):
     # Calculate bounding box of generated points
     lons = [p["lon"] for p in points]
     lats = [p["lat"] for p in points]
@@ -478,22 +422,6 @@ def plot_map(points, geojson_path, mbtiles_path, args):
     
     merc_width = merc_max_x - merc_min_x
     merc_height = merc_max_y - merc_min_y
-    target_ratio = 2.0
-    current_ratio = merc_width / merc_height if merc_height > 0 else target_ratio
-    
-    if current_ratio < target_ratio:
-        # Too tall, pad width
-        required_width = merc_height * target_ratio
-        padding_x = (required_width - merc_width) / 2.0
-        merc_min_x -= padding_x
-        merc_max_x += padding_x
-    else:
-        # Too wide, pad height
-        required_height = merc_width / target_ratio
-        padding_y = (required_height - merc_height) / 2.0
-        merc_min_y -= padding_y
-        merc_max_y += padding_y
-        
     merc_min_x = max(-MERCATOR_MAX, merc_min_x)
     merc_max_x = min(MERCATOR_MAX, merc_max_x)
     merc_min_y = max(-MERCATOR_MAX, merc_min_y)
@@ -508,7 +436,63 @@ def plot_map(points, geojson_path, mbtiles_path, args):
     plt.rcParams['font.family'] = 'sans-serif'
     plt.rcParams['font.sans-serif'] = ['Trebuchet MS', 'Verdana', 'Tahoma', 'DejaVu Sans', 'Arial', 'sans-serif']
     
+    # Calculate map dimensions and target aspect ratios
+    merc_width = merc_max_x - merc_min_x
+    merc_height = merc_max_y - merc_min_y
+    data_ratio = merc_width / merc_height if merc_height > 0 else 2.0
+    
+    left_margin, right_margin = 0.04, 0.96
+    bottom_margin, top_margin = 0.05, 0.97
+    if not getattr(args, "show_axis_ticks", True):
+        left_margin, bottom_margin = 0.02, 0.02
+        right_margin, top_margin = 0.98, 0.98
+        
+    ax_width_frac = right_margin - left_margin
+    ax_height_frac = top_margin - bottom_margin
+    
+    if getattr(args, "fit_mode", "normal") == "dynamic":
+        target_image_ratio = data_ratio / (ax_width_frac / ax_height_frac)
+        h_if_w_fixed = args.width / target_image_ratio
+        if h_if_w_fixed >= args.height:
+            dynamic_width = args.width
+            dynamic_height = h_if_w_fixed
+        else:
+            dynamic_height = args.height
+            dynamic_width = args.height * target_image_ratio
+    else:
+        # normal mode: exact fixed width and height, pad map to fit
+        dynamic_width = args.width
+        dynamic_height = args.height
+        
+        target_image_ratio = args.width / args.height
+        target_data_ratio = target_image_ratio * (ax_width_frac / ax_height_frac)
+        
+        if data_ratio < target_data_ratio:
+            required_merc_width = merc_height * target_data_ratio
+            padding_x = (required_merc_width - merc_width) / 2.0
+            merc_min_x -= padding_x
+            merc_max_x += padding_x
+        else:
+            required_merc_height = merc_width / target_data_ratio
+            padding_y = (required_merc_height - merc_height) / 2.0
+            merc_min_y -= padding_y
+            merc_max_y += padding_y
+            
+        merc_min_x = max(-MERCATOR_MAX, merc_min_x)
+        merc_max_x = min(MERCATOR_MAX, merc_max_x)
+        merc_min_y = max(-MERCATOR_MAX, merc_min_y)
+        merc_max_y = min(MERCATOR_MAX, merc_max_y)
+        
+        # update view bbox based on padded area
+        new_min_lon, new_min_lat = merc_to_lonlat(merc_min_x, merc_min_y)
+        new_max_lon, new_max_lat = merc_to_lonlat(merc_max_x, merc_max_y)
+        view_bbox = (new_min_lon, new_min_lat, new_max_lon, new_max_lat)
+        
+    args.width = dynamic_width
+    args.height = dynamic_height
+    
     fig, ax = plt.subplots(figsize=(args.width, args.height))
+    fig.subplots_adjust(left=left_margin, right=right_margin, bottom=bottom_margin, top=top_margin)
     # Aspect ratio is simply equal for Mercator
     ax.set_aspect('equal')
     fig_bg = "#11151c" if args.dark_mode else "white"
@@ -516,10 +500,6 @@ def plot_map(points, geojson_path, mbtiles_path, args):
     ax.set_facecolor(args.bg_color)
     ax.patch.set_zorder(-1)
     
-    polygon_alpha = 0.8
-    if mbtiles_path:
-        plot_mbtiles(mbtiles_path, view_bbox, ax)
-        polygon_alpha = 0.2  # Make polygons transparent to show raster tiles
         
     # Read geojson layers
     merc_bounds = (merc_min_x, merc_min_y, merc_max_x, merc_max_y)
@@ -558,14 +538,67 @@ def plot_map(points, geojson_path, mbtiles_path, args):
     for i, p in enumerate(points):
         lon, lat = p["lon"], p["lat"]
         mx, my = lonlat_to_merc(lon, lat)
-        ax.plot(mx, my, marker=args.marker, color=args.point_color, markersize=args.point_size, markeredgecolor='black', markeredgewidth=1.0, zorder=5)
+        
+        color = args.point_color
+        if group_colors and p.get("group") in group_colors:
+            color = group_colors[p["group"]]
+            
+        ax.plot(mx, my, marker=args.marker, color=color, markersize=args.point_size, markeredgecolor='black', markeredgewidth=1.0, zorder=5)
         # Label generated points
-        if args.show_labels:
-            label = f"{p['name']}\n(v:{p['value']})"
+        if args.show_labels and p.get('name'):
+            label = p['name']
+            if not getattr(args, "csv", "") and 'value' in p and p['value']:
+                label += f"\n(v:{p['value']})"
             y_offset = (merc_max_y - merc_min_y) * 0.015
             txt = ax.text(mx, my + y_offset, label, fontsize=8, fontweight='normal', color=args.label_color, ha='center', va='bottom', zorder=6, clip_on=True)
             txt.set_path_effects([PathEffects.withStroke(linewidth=1.0, foreground=args.label_outline)])
     
+
+    # Add Scale Bar
+    center_lat = (args.lat_min + args.lat_max) / 2.0
+    lon_span = new_max_lon - new_min_lon
+    view_width_m = lon_span * math.cos(math.radians(center_lat)) * 111320
+    view_width_nm = view_width_m / 1852.0
+    
+    target_scale_nm = view_width_nm * 0.10
+    magnitude = 10 ** math.floor(math.log10(max(1, target_scale_nm))) if target_scale_nm > 0 else 1
+    normalized = target_scale_nm / magnitude
+    if normalized < 2: nice_val = 1
+    elif normalized < 5: nice_val = 2
+    else: nice_val = 5
+    scale_nm = max(1, int(nice_val * magnitude))
+    
+    scale_label = f"{scale_nm} NM"
+    deg_span = (scale_nm * 1852.0) / (math.cos(math.radians(center_lat)) * 111320)
+    merc_span = deg_span * MERCATOR_MAX / 180.0
+    
+    sb_color = "#7f8c8d" if not getattr(args, "dark_mode", False) else "#b2bec3"
+    
+    # Bottom right corner for scale bar (tucked closer to edge: 0.5%)
+    sb_x = merc_max_x - (merc_max_x - merc_min_x) * 0.005
+    sb_y = merc_min_y + (merc_max_y - merc_min_y) * 0.025
+    
+    ax.plot([sb_x - merc_span, sb_x], [sb_y, sb_y], color=sb_color, linewidth=1.2, zorder=10)
+    ax.plot([sb_x - merc_span, sb_x - merc_span], [sb_y - (merc_max_y - merc_min_y)*0.003, sb_y + (merc_max_y - merc_min_y)*0.003], color=sb_color, linewidth=1.0, zorder=10)
+    ax.plot([sb_x, sb_x], [sb_y - (merc_max_y - merc_min_y)*0.003, sb_y + (merc_max_y - merc_min_y)*0.003], color=sb_color, linewidth=1.0, zorder=10)
+    ax.text(sb_x - merc_span/2, sb_y + (merc_max_y - merc_min_y)*0.004, scale_label, fontsize=8, fontweight='bold', color=sb_color, ha='center', va='bottom', zorder=10)
+
+    # Scale Ratio text centered directly under the scale bar
+    scale_ratio = int(view_width_m / (args.width * 0.0254))
+    text_y = merc_min_y + (merc_max_y - merc_min_y) * 0.006
+    ax.text(sb_x - merc_span/2, text_y, f"Scale 1:{scale_ratio:,}", fontsize=8, fontweight='bold', color=sb_color, ha='center', va='bottom', zorder=10)
+
+    # Add Legend
+    legend_elements = []
+    if group_colors:
+        for g in sorted(group_colors.keys()):
+            legend_elements.append(mlines.Line2D([0], [0], linestyle='none', marker=args.marker, color='w', markerfacecolor=group_colors[g], markersize=8, markeredgecolor='black', label=g))
+    elif not getattr(args, "csv", ""):
+        legend_elements.append(mlines.Line2D([0], [0], linestyle='none', marker=args.marker, color='w', markerfacecolor=args.point_color, markersize=8, markeredgecolor='black', label='Generated Points'))
+        
+    if legend_elements:
+        ax.legend(handles=legend_elements, loc='lower left', bbox_to_anchor=(0.005, 0.006), borderaxespad=0, fontsize=9, framealpha=0.85, facecolor=args.bg_color, edgecolor=args.map_border, labelcolor=args.label_color)
+
     ax.set_xlim(merc_min_x, merc_max_x)
     ax.set_ylim(merc_min_y, merc_max_y)
     
@@ -600,7 +633,6 @@ def plot_map(points, geojson_path, mbtiles_path, args):
         
     if args.title:
         plt.title(args.title, fontsize=18, fontweight='bold', color='#2c3e50', pad=20)
-    plt.tight_layout()
     plt.savefig(args.output, dpi=args.dpi)
     print(f"Map successfully saved to {args.output}")
 
@@ -614,9 +646,13 @@ def main():
     parser.add_argument("--rivers-data", type=str, default="rivers.geojson", help="Path to rivers GeoJSON file")
     parser.add_argument("--features-data", type=str, default="features.geojson", help="Path to features GeoJSON file")
     parser.add_argument("--features-min-zoom", type=int, default=6, help="Minimum zoom level to display features (0=world, higher=closer)")
-    parser.add_argument("--mbtiles", type=str, default="", help="Path to MBTiles file. If empty, searches current dir.")
     
     # Point Generation
+    parser.add_argument("--csv", type=str, default="", help="Path to CSV file with points")
+    parser.add_argument("--csv-lat", type=str, default="", help="CSV latitude column")
+    parser.add_argument("--csv-lon", type=str, default="", help="CSV longitude column")
+    parser.add_argument("--csv-label", type=str, default="", help="CSV label column")
+    parser.add_argument("--csv-group", type=str, default="", help="CSV group column")
     parser.add_argument("-n", "--num-points", type=int, default=15, help="Number of points to generate")
     parser.add_argument("--lat-min", type=float, default=None, help="Min latitude for point generation")
     parser.add_argument("--lat-max", type=float, default=None, help="Max latitude for point generation")
@@ -625,10 +661,11 @@ def main():
     parser.add_argument("--seed", type=int, default=None, help="Random seed for point generation")
     
     # Map Styling
-    parser.add_argument("--margin", type=float, default=0.2, help="Margin around points (fraction of width/height)")
+    parser.add_argument("--margin", type=float, default=0.1, help="Margin around points (fraction of width/height)")
     parser.add_argument("--min-margin", type=float, default=1.0, help="Minimum margin in degrees")
     parser.add_argument("--width", type=float, default=20.0, help="Image width in inches")
     parser.add_argument("--height", type=float, default=10.0, help="Image height in inches")
+    parser.add_argument("--fit-mode", choices=["normal", "dynamic"], default="normal", help="Fit mode: 'normal' fixes map to exact width/height, 'dynamic' expands to fit data.")
     parser.add_argument("--dpi", type=int, default=100, help="Output image DPI")
     parser.add_argument("--title", type=str, default="", help="Map title")
     
@@ -638,7 +675,7 @@ def main():
     parser.add_argument("--map-border", type=str, default="#7f8c8d", help="Map polygon border color")
     parser.add_argument("--border-width", type=float, default=1.0, help="Map border width")
     parser.add_argument("--point-color", type=str, default="#e74c3c", help="Generated points color")
-    parser.add_argument("--point-size", type=float, default=6.0, help="Generated points size")
+    parser.add_argument("--point-size", type=float, default=8.0, help="Generated points size")
     parser.add_argument("--marker", type=str, default="o", help="Generated points marker style")
     parser.add_argument("--label-color", type=str, default="black", help="Label text color")
     parser.add_argument("--label-outline", type=str, default="white", help="Label outline color")
@@ -687,31 +724,70 @@ def main():
         else:
             print("Warning: No .geojson file found in the current directory.")
             
-    mbtiles_path = args.mbtiles
-    if not mbtiles_path:
-        files = glob.glob("*.mbtiles")
-        if files:
-            mbtiles_path = files[0]
-            print(f"Auto-detected MBTiles file: {mbtiles_path}")
             
-    # Generate points
-    if args.seed is not None:
-        random.seed(args.seed)
-        
-    if args.lat_min is None or args.lat_max is None or args.lon_min is None or args.lon_max is None:
-        center_lat = random.uniform(-40, 50)
-        center_lon = random.uniform(-100, 100)
-        lat_spread = random.uniform(5, 15)
-        lon_spread = random.uniform(5, 15)
-        args.lat_min = center_lat - lat_spread / 2.0
-        args.lat_max = center_lat + lat_spread / 2.0
-        args.lon_min = center_lon - lon_spread / 2.0
-        args.lon_max = center_lon + lon_spread / 2.0
-        print(f"Random region selected: Lat [{args.lat_min:.2f}, {args.lat_max:.2f}], Lon [{args.lon_min:.2f}, {args.lon_max:.2f}]")
-    points = generate_points(args.num_points, args.lat_min, args.lat_max, args.lon_min, args.lon_max)
+    # Generate or Load points
+    points = []
+    groups_present = set()
+    group_colors = {}
+    
+    if args.csv:
+        print(f"Loading points from {args.csv}...")
+        with open(args.csv, newline='', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            headers = [h.lower() for h in reader.fieldnames] if reader.fieldnames else []
+            lat_col = args.csv_lat if args.csv_lat else next((h for h in reader.fieldnames if h.lower() in ('lat', 'latitude')), None)
+            lon_col = args.csv_lon if args.csv_lon else next((h for h in reader.fieldnames if h.lower() in ('lon', 'longitude', 'lng')), None)
+            lbl_col = args.csv_label if args.csv_label else next((h for h in reader.fieldnames if h.lower() in ('label', 'name', 'site', 'title')), None)
+            grp_col = args.csv_group if args.csv_group else next((h for h in reader.fieldnames if h.lower() in ('group', 'category', 'type')), None)
+            
+            if not lat_col or not lon_col:
+                print("Error: Could not determine latitude and longitude columns in CSV.")
+                sys.exit(1)
+                
+            for row in reader:
+                try:
+                    lat = float(row[lat_col])
+                    lon = float(row[lon_col])
+                    name = row[lbl_col] if lbl_col and lbl_col in row else ""
+                    group = row[grp_col] if grp_col and grp_col in row else ""
+                    points.append({"lon": lon, "lat": lat, "name": name, "value": 0, "group": group})
+                    if group:
+                        groups_present.add(group)
+                except (ValueError, KeyError):
+                    continue
+        if points:
+            lons = [p["lon"] for p in points]
+            lats = [p["lat"] for p in points]
+            # Ensure we don't accidentally restrict bounds if the user specified them
+            if args.lat_min is None: args.lat_min = min(lats)
+            if args.lat_max is None: args.lat_max = max(lats)
+            if args.lon_min is None: args.lon_min = min(lons)
+            if args.lon_max is None: args.lon_max = max(lons)
+            
+        if groups_present:
+            cmap = cm.get_cmap('Set3')
+            colors = [matplotlib.colors.to_hex(cmap(i/11.0)) for i in range(12)]
+            for i, g in enumerate(sorted(groups_present)):
+                group_colors[g] = colors[i % len(colors)]
+    else:
+        if args.seed is not None:
+            random.seed(args.seed)
+            
+        if args.lat_min is None or args.lat_max is None or args.lon_min is None or args.lon_max is None:
+            center_lat = random.uniform(-40, 50)
+            center_lon = random.uniform(-100, 100)
+            lat_spread = random.uniform(5, 15)
+            lon_spread = random.uniform(5, 15)
+            args.lat_min = center_lat - lat_spread / 2.0
+            args.lat_max = center_lat + lat_spread / 2.0
+            args.lon_min = center_lon - lon_spread / 2.0
+            args.lon_max = center_lon + lon_spread / 2.0
+            print(f"Random region selected: Lat [{args.lat_min:.2f}, {args.lat_max:.2f}], Lon [{args.lon_min:.2f}, {args.lon_max:.2f}]")
+        points = generate_points(args.num_points, args.lat_min, args.lat_max, args.lon_min, args.lon_max)
+
     
     # Plot
-    plot_map(points, geojson_path, mbtiles_path, args)
+    plot_map(points, geojson_path, args, group_colors)
 
 if __name__ == "__main__":
     main()
