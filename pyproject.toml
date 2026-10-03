@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "t3map"
+version = "0.1.0"
+description = "A lightweight tool to generate beautiful regional maps using matplotlib and GeoJSON."
+readme = "README.md"
+requires-python = ">=3.7"
+dependencies = [
+    "matplotlib",
+]
+
+[project.scripts]
+t3map = "t3map.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+t3map = ["data/*.geojson"]

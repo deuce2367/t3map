@@ -637,14 +637,17 @@ def plot_map(points, geojson_path, args, group_colors=None):
     print(f"Map successfully saved to {args.output}")
 
 def main():
+    import os
+    PKG_DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+
     parser = argparse.ArgumentParser(description="Generate lat/lon points and plot them on a map using local GeoJSON.")
     
     # Input/Output
-    parser.add_argument("-o", "--output", type=str, default="map.png", help="Output image filename")
-    parser.add_argument("--geojson", type=str, default="", help="Path to GeoJSON file. If empty, searches current dir.")
-    parser.add_argument("--water-data", type=str, default="water.geojson", help="Path to water GeoJSON file")
-    parser.add_argument("--rivers-data", type=str, default="rivers.geojson", help="Path to rivers GeoJSON file")
-    parser.add_argument("--features-data", type=str, default="features.geojson", help="Path to features GeoJSON file")
+    parser.add_argument("-o", "--output", type=str, default="/tmp/map.png", help="Output image filename")
+    parser.add_argument("--geojson", type=str, default=os.path.join(PKG_DATA_DIR, "world.geojson"), help="Path to GeoJSON file.")
+    parser.add_argument("--water-data", type=str, default=os.path.join(PKG_DATA_DIR, "water.geojson"), help="Path to water GeoJSON file")
+    parser.add_argument("--rivers-data", type=str, default=os.path.join(PKG_DATA_DIR, "rivers.geojson"), help="Path to rivers GeoJSON file")
+    parser.add_argument("--features-data", type=str, default=os.path.join(PKG_DATA_DIR, "features.geojson"), help="Path to features GeoJSON file")
     parser.add_argument("--features-min-zoom", type=int, default=6, help="Minimum zoom level to display features (0=world, higher=closer)")
     
     # Point Generation
@@ -712,17 +715,8 @@ def main():
     
     # Find geojson if not specified
     geojson_path = args.geojson
-    if not geojson_path:
-        files = glob.glob("*.geojson")
-        if files:
-            cands = [f for f in files if f not in ("water.geojson", "rivers.geojson", "features.geojson")]
-            if cands:
-                geojson_path = cands[0]
-                print(f"Auto-detected GeoJSON file: {geojson_path}")
-            else:
-                print("Warning: No base map .geojson file found (excluding auxiliary files).")
-        else:
-            print("Warning: No .geojson file found in the current directory.")
+    if not geojson_path or not os.path.exists(geojson_path):
+        print(f"Warning: Base map geojson file not found at {geojson_path}. Map may not render background.")
             
             
     # Generate or Load points
