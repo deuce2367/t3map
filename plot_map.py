@@ -76,7 +76,7 @@ def get_feature_bbox(feature):
     lats = [c[1] for c in flat_coords]
     return (min(lons), min(lats), max(lons), max(lats))
 
-def create_polygon_patch(coords, facecolor, edgecolor, linewidth, alpha):
+def create_polygon_patch(coords, facecolor, edgecolor, linewidth, alpha, zorder=1):
     vertices = []
     codes = []
     for ring in coords:
@@ -91,7 +91,7 @@ def create_polygon_patch(coords, facecolor, edgecolor, linewidth, alpha):
     if not vertices:
         return None
     path = Path(vertices, codes)
-    patch = PathPatch(path, facecolor=facecolor, edgecolor=edgecolor, linewidth=linewidth, alpha=alpha)
+    patch = PathPatch(path, facecolor=facecolor, edgecolor=edgecolor, linewidth=linewidth, alpha=alpha, zorder=zorder)
     return patch, path
 
 def plot_mbtiles(db_path, view_bbox, ax):
@@ -154,8 +154,10 @@ def plot_mbtiles(db_path, view_bbox, ax):
     conn.close()
     print(f"Drawn {tiles_drawn} raster tiles from MBTiles.")
 
-def plot_geojson_layer(geojson_path, view_bbox, ax, args, merc_bounds, is_water=False):
+def plot_geojson_layer(geojson_path, view_bbox, ax, args, merc_bounds, layer_type="land"):
     merc_min_x, merc_min_y, merc_max_x, merc_max_y = merc_bounds
+    is_water = layer_type == "water"
+    is_river = layer_type == "river"
     try:
         with open(geojson_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
@@ -182,24 +184,44 @@ def plot_geojson_layer(geojson_path, view_bbox, ax, args, merc_bounds, is_water=
             name = props.get("name", "")
             if not name:
                 name = props.get("name_en", "") # fallback
+            if not name:
+                name = props.get("NAME", "") # fallback for rivers
                 
             if name:
                 name = textwrap.fill(name, width=12)
             
             paths = []
-            if gtype == "Polygon":
-                res = create_polygon_patch(coords, args.map_fill, args.map_border, args.border_width, 0.8 if not is_water else 0.0)
-                if res: 
-                    if not is_water:
-                        ax.add_patch(res[0])
-                    paths.append(res[1])
-            elif gtype == "MultiPolygon":
-                for poly_coords in coords:
-                    res = create_polygon_patch(poly_coords, args.map_fill, args.map_border, args.border_width, 0.8 if not is_water else 0.0)
-                    if res: 
-                        if not is_water:
-                            ax.add_patch(res[0])
-                        paths.append(res[1])
+            if gtype in ("Polygon", "MultiPolygon"):
+                coords_list = [coords] if gtype == "Polygon" else coords
+                for poly_coords in coords_list:
+                    if layer_type == "land":
+                        fill_res = create_polygon_patch(poly_coords, args.map_fill, 'none', 0, 0.8, zorder=1)
+                        edge_res = create_polygon_patch(poly_coords, 'none', args.map_border, args.border_width, 0.8, zorder=3)
+                        if fill_res and edge_res:
+                            ax.add_patch(fill_res[0])
+                            ax.add_patch(edge_res[0])
+                            paths.append(fill_res[1])
+                    elif layer_type == "water":
+                        fill_res = create_polygon_patch(poly_coords, 'none', 'none', 0, 0.0, zorder=0)
+                        if fill_res:
+                            paths.append(fill_res[1])
+            elif gtype == "LineString" and is_river:
+                merc_coords = [lonlat_to_merc(c[0], c[1]) for c in coords]
+                is_vis = any(merc_min_x <= c[0] <= merc_max_x and merc_min_y <= c[1] <= merc_max_y for c in merc_coords)
+                if is_vis:
+                    x = [c[0] for c in merc_coords]
+                    y = [c[1] for c in merc_coords]
+                    ax.plot(x, y, color=args.bg_color, linewidth=1.5, zorder=2)
+                    paths.append(Path(merc_coords))
+            elif gtype == "MultiLineString" and is_river:
+                for line_coords in coords:
+                    merc_coords = [lonlat_to_merc(c[0], c[1]) for c in line_coords]
+                    is_vis = any(merc_min_x <= c[0] <= merc_max_x and merc_min_y <= c[1] <= merc_max_y for c in merc_coords)
+                    if is_vis:
+                        x = [c[0] for c in merc_coords]
+                        y = [c[1] for c in merc_coords]
+                        ax.plot(x, y, color=args.bg_color, linewidth=1.5, zorder=2)
+                        paths.append(Path(merc_coords))
                         
             # Check actual visibility
             view_bbox_merc = Bbox.from_extents(merc_min_x, merc_min_y, merc_max_x, merc_max_y)
@@ -209,7 +231,34 @@ def plot_geojson_layer(geojson_path, view_bbox, ax, args, merc_bounds, is_water=
                 continue
             
             # Plot Polygon labels
-            if gtype in ("Polygon", "MultiPolygon") and name and args.show_map_labels:
+            if is_river and name and args.show_map_labels:
+                best_len = 0
+                best_seg = None
+                for p in paths:
+                    verts = p.vertices
+                    for i in range(len(verts)-1):
+                        p1, p2 = verts[i], verts[i+1]
+                        if (merc_min_x <= p1[0] <= merc_max_x and merc_min_y <= p1[1] <= merc_max_y) or \
+                           (merc_min_x <= p2[0] <= merc_max_x and merc_min_y <= p2[1] <= merc_max_y):
+                            seg_len = math.hypot(p2[0]-p1[0], p2[1]-p1[1])
+                            if seg_len > best_len:
+                                best_len = seg_len
+                                best_seg = (p1, p2)
+                
+                if best_seg and best_len > (merc_max_x - merc_min_x) * 0.02:
+                    p1, p2 = best_seg
+                    mid_x = (p1[0] + p2[0]) / 2.0
+                    mid_y = (p1[1] + p2[1]) / 2.0
+                    angle = math.degrees(math.atan2(p2[1]-p1[1], p2[0]-p1[0]))
+                    if angle > 90: angle -= 180
+                    elif angle < -90: angle += 180
+                    
+                    label_color = args.water_label_color
+                    txt = ax.text(mid_x, mid_y, name, fontsize=6.5, fontweight='bold', fontstyle='italic',
+                                  color=label_color, ha='center', va='center', rotation=angle, 
+                                  zorder=2, clip_on=True, alpha=0.85)
+
+            elif gtype in ("Polygon", "MultiPolygon") and name and args.show_map_labels:
                 best_path = None
                 max_vis_diag = 0
                 best_min_vx = best_max_vx = best_min_vy = best_max_vy = 0
@@ -319,7 +368,7 @@ def plot_geojson_layer(geojson_path, view_bbox, ax, args, merc_bounds, is_water=
                 alpha_val = 0.6 if is_water else 0.85
                 
                 txt = ax.text(text_mx, text_my, name, fontsize=label_size, fontweight='bold', fontstyle=font_style,
-                              color=label_color, ha='center', va='center', alpha=alpha_val, zorder=2, clip_on=True)
+                              color=label_color, ha='center', va='center', alpha=alpha_val, zorder=4, clip_on=True)
                 
                 if not is_water:
                     txt.set_path_effects([PathEffects.withStroke(linewidth=3.0, foreground=args.map_label_outline)])
@@ -418,11 +467,17 @@ def plot_map(points, geojson_path, mbtiles_path, args):
     
     if geojson_path:
         print(f"Loading map data from {geojson_path}...")
-        plot_geojson_layer(geojson_path, view_bbox, ax, args, merc_bounds, is_water=False)
+        plot_geojson_layer(geojson_path, view_bbox, ax, args, merc_bounds, layer_type="land")
         
     if getattr(args, "water_data", None):
         print(f"Loading water data from {args.water_data}...")
-        plot_geojson_layer(args.water_data, view_bbox, ax, args, merc_bounds, is_water=True)
+        plot_geojson_layer(args.water_data, view_bbox, ax, args, merc_bounds, layer_type="water")
+        
+    if getattr(args, "rivers_data", None):
+        import os
+        if os.path.exists(args.rivers_data):
+            print(f"Loading rivers data from {args.rivers_data}...")
+            plot_geojson_layer(args.rivers_data, view_bbox, ax, args, merc_bounds, layer_type="river")
     
     # Plot generated points
     for i, p in enumerate(points):
@@ -481,6 +536,7 @@ def main():
     parser.add_argument("-o", "--output", type=str, default="map.png", help="Output image filename")
     parser.add_argument("--geojson", type=str, default="", help="Path to GeoJSON file. If empty, searches current dir.")
     parser.add_argument("--water-data", type=str, default="water.geojson", help="Path to water GeoJSON file")
+    parser.add_argument("--rivers-data", type=str, default="rivers.geojson", help="Path to rivers GeoJSON file")
     parser.add_argument("--mbtiles", type=str, default="", help="Path to MBTiles file. If empty, searches current dir.")
     
     # Point Generation
