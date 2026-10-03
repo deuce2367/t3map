@@ -7,12 +7,12 @@ A lightweight, purely Python-based tool for rendering beautiful, publication-rea
 ### Normal Fit Mode (Strict 2:1 Ratio)
 By default, the map generator enforces strict bounding box constraints (e.g., 20x10 inches), intelligently padding your map data to fit the required aspect ratio perfectly.
 
-![Normal Map](images/map.png)
+![Normal Map](images/map_normal.png)
 
 ### Dynamic Fit Mode
 Alternatively, you can allow the map to dynamically snap to the exact aspect ratio of your data points, ensuring minimal whitespace and a tightly fitted layout.
 
-![Dynamic Map](images/map-dark.png)
+![Dynamic Map](images/map_dynamic.png)
 
 ## Features
 * **Zero Heavy GIS Dependencies**: Relies entirely on `matplotlib` and Python's standard `json`/`math` libraries (no `geopandas`, `GDAL`, or `rasterio` required).
