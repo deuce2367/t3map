@@ -17,7 +17,8 @@ import matplotlib.patheffects as PathEffects
 from matplotlib.path import Path
 from matplotlib.patches import PathPatch
 from matplotlib.transforms import Bbox
-from adjustText import adjust_text
+from matplotlib.offsetbox import OffsetImage, AnnotationBbox
+import textwrap
 import textwrap
 
 def generate_points(n, lat_min, lat_max, lon_min, lon_max):
@@ -195,12 +196,19 @@ def plot_geojson_layer(geojson_path, view_bbox, ax, args, merc_bounds, layer_typ
                 coords_list = [coords] if gtype == "Polygon" else coords
                 for poly_coords in coords_list:
                     if layer_type == "land":
-                        fill_res = create_polygon_patch(poly_coords, args.map_fill, 'none', 0, 0.8, zorder=1)
-                        edge_res = create_polygon_patch(poly_coords, 'none', args.map_border, args.border_width, 0.8, zorder=3)
-                        if fill_res and edge_res:
+                        # Add filled polygon with facecolor AND edgecolor same
+                        fill_res = create_polygon_patch(poly_coords, args.map_fill, args.map_fill, 0.1, 0.8, zorder=1)
+                        if fill_res:
                             ax.add_patch(fill_res[0])
-                            ax.add_patch(edge_res[0])
                             paths.append(fill_res[1])
+                            
+                        # Add independent borders using ax.plot for 100% reliability
+                        for ring in poly_coords:
+                            if not ring: continue
+                            proj_ring = [lonlat_to_merc(pt[0], pt[1]) for pt in ring]
+                            x = [pt[0] for pt in proj_ring]
+                            y = [pt[1] for pt in proj_ring]
+                            ax.plot(x, y, color=args.map_border, linewidth=args.border_width, alpha=0.8, zorder=3)
                     elif layer_type == "water":
                         fill_res = create_polygon_patch(poly_coords, 'none', 'none', 0, 0.0, zorder=0)
                         if fill_res:
@@ -227,7 +235,7 @@ def plot_geojson_layer(geojson_path, view_bbox, ax, args, merc_bounds, layer_typ
             view_bbox_merc = Bbox.from_extents(merc_min_x, merc_min_y, merc_max_x, merc_max_y)
             is_visible = any(p.intersects_bbox(view_bbox_merc) for p in paths)
             
-            if not is_visible:
+            if not is_visible and layer_type != "feature":
                 continue
             
             # Plot Polygon labels
@@ -380,6 +388,56 @@ def plot_geojson_layer(geojson_path, view_bbox, ax, args, merc_bounds, layer_typ
                         ax.plot([text_mx, anchor_mx], [text_my, anchor_my], 
                                 color=label_color, linestyle='--', linewidth=1.5, alpha=0.7, zorder=1)
                         ax.plot(anchor_mx, anchor_my, marker='o', color=label_color, markersize=4.0, alpha=0.8, zorder=1)
+            elif gtype == "Point" and layer_type == "feature":
+                import os
+                mx, my = lonlat_to_merc(coords[0], coords[1])
+                if merc_min_x <= mx <= merc_max_x and merc_min_y <= my <= merc_max_y:
+                    f_type = props.get("type")
+                    icon_path = f"icons/{f_type}.png" if f_type else None
+                    if icon_path and os.path.exists(icon_path):
+                        # Recolor the icon to match the map label color (which is subtle)
+                        img = plt.imread(icon_path)
+                        if img.shape[-1] == 4:
+                            from matplotlib.colors import to_rgba
+                            r, g, b, _ = to_rgba(args.map_label_color)
+                            # The user wanted them subtle, maybe a bit darker than labels
+                            factor = 1.2 if getattr(args, "dark_mode", False) else 0.8
+                            img[:, :, 0] = min(1.0, r * factor)
+                            img[:, :, 1] = min(1.0, g * factor)
+                            img[:, :, 2] = min(1.0, b * factor)
+                        
+                        imagebox = OffsetImage(img, zoom=0.10, alpha=0.8)
+                        ab = AnnotationBbox(imagebox, (mx, my), frameon=False, zorder=6)
+                        ax.add_artist(ab)
+                    else:
+                        ax.plot(mx, my, marker='*', color=args.map_label_color, markersize=4.0, zorder=6)
+                        
+                    if name:
+                        y_offset = (merc_max_y - merc_min_y) * 0.012
+                        txt = ax.text(mx, my - y_offset, name, fontsize=5, fontweight='normal', 
+                                      color=args.map_label_color, ha='center', va='top', zorder=6, clip_on=True)
+                        txt.set_path_effects([PathEffects.withStroke(linewidth=1.5, foreground=args.bg_color)])
+            elif gtype == "LineString" and layer_type == "feature":
+                merc_coords = [lonlat_to_merc(c[0], c[1]) for c in coords]
+                is_vis = any(merc_min_x <= c[0] <= merc_max_x and merc_min_y <= c[1] <= merc_max_y for c in merc_coords)
+                if is_vis:
+                    x = [c[0] for c in merc_coords]
+                    y = [c[1] for c in merc_coords]
+                    ax.plot(x, y, color=args.tick_color, linewidth=1.0, linestyle='--', alpha=0.4, zorder=5)
+                    
+                    if name:
+                        mid_idx = len(merc_coords) // 2
+                        p1, p2 = merc_coords[mid_idx-1], merc_coords[mid_idx]
+                        mid_x = (p1[0] + p2[0]) / 2.0
+                        mid_y = (p1[1] + p2[1]) / 2.0
+                        angle = math.degrees(math.atan2(p2[1]-p1[1], p2[0]-p1[0]))
+                        if angle > 90: angle -= 180
+                        elif angle < -90: angle += 180
+                        
+                        txt = ax.text(mid_x, mid_y, name, fontsize=6, fontweight='bold', fontstyle='italic',
+                                      color=args.tick_color, ha='center', va='bottom', rotation=angle, 
+                                      zorder=5, clip_on=True, alpha=0.6)
+                        txt.set_path_effects([PathEffects.withStroke(linewidth=2.0, foreground=args.bg_color)])
             elif gtype == "Point" and not is_water:
                 mx, my = lonlat_to_merc(coords[0], coords[1])
                 ax.plot(mx, my, marker='o', color=args.map_point_color, markersize=args.map_point_size)
@@ -456,6 +514,7 @@ def plot_map(points, geojson_path, mbtiles_path, args):
     fig_bg = "#11151c" if args.dark_mode else "white"
     fig.patch.set_facecolor(fig_bg)
     ax.set_facecolor(args.bg_color)
+    ax.patch.set_zorder(-1)
     
     polygon_alpha = 0.8
     if mbtiles_path:
@@ -478,6 +537,22 @@ def plot_map(points, geojson_path, mbtiles_path, args):
         if os.path.exists(args.rivers_data):
             print(f"Loading rivers data from {args.rivers_data}...")
             plot_geojson_layer(args.rivers_data, view_bbox, ax, args, merc_bounds, layer_type="river")
+            
+    if getattr(args, "features_data", None):
+        import os
+        if os.path.exists(args.features_data):
+            lon_span = new_max_lon - new_min_lon
+            map_zoom = 0
+            if lon_span > 0:
+                target_tiles = 4.0
+                map_zoom = int(round(math.log2(360.0 * target_tiles / lon_span)))
+                map_zoom = max(0, map_zoom)
+                
+            if map_zoom >= args.features_min_zoom:
+                print(f"Loading features data from {args.features_data} (zoom level {map_zoom} >= {args.features_min_zoom})...")
+                plot_geojson_layer(args.features_data, view_bbox, ax, args, merc_bounds, layer_type="feature")
+            else:
+                print(f"Skipping features data (zoom level {map_zoom} < {args.features_min_zoom}).")
     
     # Plot generated points
     for i, p in enumerate(points):
@@ -537,6 +612,8 @@ def main():
     parser.add_argument("--geojson", type=str, default="", help="Path to GeoJSON file. If empty, searches current dir.")
     parser.add_argument("--water-data", type=str, default="water.geojson", help="Path to water GeoJSON file")
     parser.add_argument("--rivers-data", type=str, default="rivers.geojson", help="Path to rivers GeoJSON file")
+    parser.add_argument("--features-data", type=str, default="features.geojson", help="Path to features GeoJSON file")
+    parser.add_argument("--features-min-zoom", type=int, default=6, help="Minimum zoom level to display features (0=world, higher=closer)")
     parser.add_argument("--mbtiles", type=str, default="", help="Path to MBTiles file. If empty, searches current dir.")
     
     # Point Generation
@@ -601,8 +678,12 @@ def main():
     if not geojson_path:
         files = glob.glob("*.geojson")
         if files:
-            geojson_path = files[0]
-            print(f"Auto-detected GeoJSON file: {geojson_path}")
+            cands = [f for f in files if f not in ("water.geojson", "rivers.geojson", "features.geojson")]
+            if cands:
+                geojson_path = cands[0]
+                print(f"Auto-detected GeoJSON file: {geojson_path}")
+            else:
+                print("Warning: No base map .geojson file found (excluding auxiliary files).")
         else:
             print("Warning: No .geojson file found in the current directory.")
             
