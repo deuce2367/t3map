@@ -163,6 +163,10 @@ def plot_geojson_layer(geojson_path, view_bbox, ax, args, merc_bounds, layer_typ
         with open(geojson_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
 
+        from matplotlib.collections import PatchCollection, LineCollection
+        layer_patches = []
+        layer_lines = []
+
         features = data.get("features", [])
         print(f"Total features in {'water' if is_water else 'map'} geojson: {len(features)}")
 
@@ -199,15 +203,15 @@ def plot_geojson_layer(geojson_path, view_bbox, ax, args, merc_bounds, layer_typ
                         # Add filled polygon with facecolor AND edgecolor same
                         fill_res = create_polygon_patch(poly_coords, args.map_fill, args.map_fill, 0.1, 0.8, zorder=1)
                         if fill_res:
-                            ax.add_patch(fill_res[0])
+                            layer_patches.append(fill_res[0])
                             paths.append(fill_res[1])
 
-                        # Add independent borders using ax.plot for 100% reliability
+                        # Add independent borders
                         for ring in poly_coords:
                             if not ring: continue
                             ring_arr = np.array(ring)
                             x, y = lonlat_to_merc(ring_arr[:, 0], ring_arr[:, 1])
-                            ax.plot(x, y, color=args.map_border, linewidth=args.border_width, alpha=0.8, zorder=3)
+                            layer_lines.append(np.column_stack((x, y)))
                     elif layer_type == "water":
                         fill_res = create_polygon_patch(poly_coords, 'none', 'none', 0, 0.0, zorder=0)
                         if fill_res:
@@ -217,7 +221,7 @@ def plot_geojson_layer(geojson_path, view_bbox, ax, args, merc_bounds, layer_typ
                 x, y = lonlat_to_merc(c_arr[:, 0], c_arr[:, 1])
                 is_vis = np.any((x >= merc_min_x) & (x <= merc_max_x) & (y >= merc_min_y) & (y <= merc_max_y))
                 if is_vis:
-                    ax.plot(x, y, color=args.bg_color, linewidth=1.5, zorder=2)
+                    layer_lines.append(np.column_stack((x, y)))
                     paths.append(Path(np.column_stack((x, y))))
             elif gtype == "MultiLineString" and is_river:
                 for line_coords in coords:
@@ -225,7 +229,7 @@ def plot_geojson_layer(geojson_path, view_bbox, ax, args, merc_bounds, layer_typ
                     x, y = lonlat_to_merc(c_arr[:, 0], c_arr[:, 1])
                     is_vis = np.any((x >= merc_min_x) & (x <= merc_max_x) & (y >= merc_min_y) & (y <= merc_max_y))
                     if is_vis:
-                        ax.plot(x, y, color=args.bg_color, linewidth=1.5, zorder=2)
+                        layer_lines.append(np.column_stack((x, y)))
                         paths.append(Path(np.column_stack((x, y))))
 
             # Check actual visibility
@@ -459,6 +463,19 @@ def plot_geojson_layer(geojson_path, view_bbox, ax, args, merc_bounds, layer_typ
                     ax.plot(mx, my, marker='o', color=args.map_point_color, markersize=args.map_point_size)
 
             plotted_features += 1
+
+        if layer_patches:
+            if layer_type == "land":
+                pc = PatchCollection(layer_patches, facecolor=args.map_fill, edgecolor=args.map_fill, linewidth=0.1, alpha=0.8, zorder=1)
+                ax.add_collection(pc)
+
+        if layer_lines:
+            if layer_type == "land":
+                lc = LineCollection(layer_lines, color=args.map_border, linewidth=args.border_width, alpha=0.8, zorder=3)
+                ax.add_collection(lc)
+            elif layer_type == "river":
+                lc = LineCollection(layer_lines, color=args.bg_color, linewidth=1.5, zorder=2)
+                ax.add_collection(lc)
 
         print(f"Filtered and plotted {plotted_features} features within the map bounds.")
     except Exception as e:
@@ -829,7 +846,7 @@ def main():
             if args.lon_max is None: args.lon_max = max(lons)
 
         if groups_present:
-            cmap = cm.get_cmap('Set3')
+            cmap = matplotlib.colormaps['Set3']
             colors = [matplotlib.colors.to_hex(cmap(i/11.0)) for i in range(12)]
             for i, g in enumerate(sorted(groups_present)):
                 group_colors[g] = colors[i % len(colors)]
