@@ -25,12 +25,14 @@ import textwrap
 def generate_points(n, lat_min, lat_max, lon_min, lon_max):
     points = []
     prefixes = ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Gamma", "Nexus", "Omega"]
+    groups = ["Research", "Observation", "Forward", "Supply"]
     for i in range(n):
         lat = random.uniform(lat_min, lat_max)
         lon = random.uniform(lon_min, lon_max)
         name = f"Site {random.choice(prefixes)}-{random.randint(10,99)}"
         value = random.randint(100, 1000)
-        points.append({"lon": lon, "lat": lat, "name": name, "value": value})
+        group = random.choice(groups)
+        points.append({"lon": lon, "lat": lat, "name": name, "value": value, "group": group})
     return points
 
 def add_compass_rose(ax, loc, color):
@@ -271,7 +273,7 @@ def plot_geojson_layer(geojson_path, view_bbox, ax, args, merc_bounds, layer_typ
                     label_color = args.water_label_color
                     txt = ax.text(mid_x, mid_y, name, fontsize=6.5, fontweight='bold', fontstyle='italic',
                                   color=label_color, ha='center', va='center', rotation=angle,
-                                  zorder=2, clip_on=True, alpha=0.85)
+                                  zorder=2, clip_on=True, alpha=0.9)
 
             elif gtype in ("Polygon", "MultiPolygon") and name and args.show_map_labels:
                 best_path = None
@@ -534,19 +536,25 @@ def plot_map(points, geojson_path, args, group_colors=None):
 
     if getattr(args, "fit_mode", "normal") == "dynamic":
         target_image_ratio = data_ratio / (ax_width_frac / ax_height_frac)
-        h_if_w_fixed = args.width / target_image_ratio
-        if h_if_w_fixed >= args.height:
-            dynamic_width = args.width
-            dynamic_height = h_if_w_fixed
+        if target_image_ratio >= 1.0:
+            height_pixels = args.size
+            width_pixels = args.size * target_image_ratio
         else:
-            dynamic_height = args.height
-            dynamic_width = args.height * target_image_ratio
-    else:
-        # normal mode: exact fixed width and height, pad map to fit
-        dynamic_width = args.width
-        dynamic_height = args.height
+            width_pixels = args.size
+            height_pixels = args.size / target_image_ratio
 
-        target_image_ratio = args.width / args.height
+        dynamic_width = width_pixels / args.dpi
+        dynamic_height = height_pixels / args.dpi
+    else:
+        # normal mode: exact 2:1 target image ratio
+        target_image_ratio = 2.0
+
+        height_pixels = args.size
+        width_pixels = args.size * target_image_ratio
+
+        dynamic_width = width_pixels / args.dpi
+        dynamic_height = height_pixels / args.dpi
+
         target_data_ratio = target_image_ratio * (ax_width_frac / ax_height_frac)
 
         if data_ratio < target_data_ratio:
@@ -565,10 +573,9 @@ def plot_map(points, geojson_path, args, group_colors=None):
         merc_min_y = max(-MERCATOR_MAX, merc_min_y)
         merc_max_y = min(MERCATOR_MAX, merc_max_y)
 
-        # update view bbox based on padded area
-        new_min_lon, new_min_lat = merc_to_lonlat(merc_min_x, merc_min_y)
-        new_max_lon, new_max_lat = merc_to_lonlat(merc_max_x, merc_max_y)
-        view_bbox = (new_min_lon, new_min_lat, new_max_lon, new_max_lat)
+    new_min_lon, new_min_lat = merc_to_lonlat(merc_min_x, merc_min_y)
+    new_max_lon, new_max_lat = merc_to_lonlat(merc_max_x, merc_max_y)
+    view_bbox = (new_min_lon, new_min_lat, new_max_lon, new_max_lat)
 
     args.width = dynamic_width
     args.height = dynamic_height
@@ -631,8 +638,8 @@ def plot_map(points, geojson_path, args, group_colors=None):
             label = p['name']
             if not getattr(args, "csv", "") and 'value' in p and p['value']:
                 label += f"\n(v:{p['value']})"
-            y_offset = (merc_max_y - merc_min_y) * 0.015
-            txt = ax.text(mx, my + y_offset, label, fontsize=8, fontweight='normal', color=args.label_color, ha='center', va='bottom', zorder=6, clip_on=True)
+            y_offset = (merc_max_y - merc_min_y) * 0.007
+            txt = ax.text(mx, my + y_offset, label, fontsize=8, fontweight='normal', color=args.label_color, ha='center', va='bottom', zorder=6, clip_on=True, linespacing=0.85)
             txt.set_path_effects([PathEffects.withStroke(linewidth=1.0, foreground=args.label_outline)])
 
 
@@ -754,32 +761,19 @@ def main():
     # Map Styling
     parser.add_argument("--margin", type=float, default=0.1, help="Margin around points (fraction of width/height)")
     parser.add_argument("--min-margin", type=float, default=1.0, help="Minimum margin in degrees")
-    parser.add_argument("--width", type=float, default=20.0, help="Image width in inches")
-    parser.add_argument("--height", type=float, default=10.0, help="Image height in inches")
-    parser.add_argument("--fit-mode", choices=["normal", "dynamic"], default="normal", help="Fit mode: 'normal' fixes map to exact width/height, 'dynamic' expands to fit data.")
+    parser.add_argument("--size", type=int, default=1024, help="Minimum dimension of the output image in pixels")
+    parser.add_argument("--fit-mode", choices=["normal", "dynamic"], default="normal", help="Fit mode: 'normal' fixes map to exact 2:1 ratio, 'dynamic' expands to fit data.")
     parser.add_argument("--dpi", type=int, default=100, help="Output image DPI")
     parser.add_argument("--title", type=str, default="", help="Map title")
 
-    # Colors
-    parser.add_argument("--bg-color", type=str, default="#e0f3f8", help="Background color (ocean/empty area)")
-    parser.add_argument("--map-fill", type=str, default="#fefee9", help="Map polygon fill color")
-    parser.add_argument("--map-border", type=str, default="#7f8c8d", help="Map polygon border color")
+    # Styling
     parser.add_argument("--border-width", type=float, default=1.0, help="Map border width")
-    parser.add_argument("--point-color", type=str, default="#e74c3c", help="Generated points color")
     parser.add_argument("--point-size", type=float, default=8.0, help="Generated points size")
     parser.add_argument("--marker", type=str, default="o", help="Generated points marker style")
-    parser.add_argument("--label-color", type=str, default="black", help="Label text color")
-    parser.add_argument("--label-outline", type=str, default="white", help="Label outline color")
-    parser.add_argument("--tick-color", type=str, default="black", help="Axis tick and label color")
-
-    # Map Points
-    parser.add_argument("--map-point-color", type=str, default="#95a5a6", help="Map data points color")
     parser.add_argument("--map-point-size", type=float, default=4.0, help="Map data points size")
-    parser.add_argument("--map-label-color", type=str, default="#2980b9", help="Map data labels color")
     parser.add_argument("--map-label-size", type=float, default=15.0, help="Map data labels size")
-    parser.add_argument("--map-label-outline", type=str, default="white", help="Map data labels outline color")
-    parser.add_argument("--water-label-color", type=str, default="#95c5d8", help="Water body label color")
     parser.add_argument("--water-label-size", type=float, default=26.0, help="Water body label size")
+
     parser.add_argument("--no-map-labels", dest="show_map_labels", action="store_false", help="Hide labels for map data points and polygons")
     parser.add_argument("--no-labels", dest="show_labels", action="store_false", help="Hide labels for generated points")
     parser.add_argument("--no-axis-ticks", dest="show_axis_ticks", action="store_false", help="Hide lat/lon axis ticks")
@@ -788,18 +782,30 @@ def main():
     args = parser.parse_args()
 
     if args.dark_mode:
-        if args.bg_color == "#e0f3f8": args.bg_color = "#1a252c"
-        if args.map_fill == "#fefee9": args.map_fill = "#2d3436"
-        if args.map_border == "#7f8c8d": args.map_border = "#576574"
-        if args.point_color == "#e74c3c": args.point_color = "#ff7675"
-        if args.label_color == "black": args.label_color = "white"
-        if args.label_outline == "white": args.label_outline = "black"
-        if args.tick_color == "black": args.tick_color = "#b2bec3"
-        if args.map_point_color == "#95a5a6": args.map_point_color = "#636e72"
-        if args.map_label_color == "#2980b9": args.map_label_color = "#7f8c8d" # subtle gray fill
-        if args.map_label_outline == "white": args.map_label_outline = "#2d3436" # outline matches land to hide it
-        if args.water_label_color == "#95c5d8": args.water_label_color = "#2c3e50"
-        if args.map_label_size == 15.0: args.map_label_size = 11.0
+        args.bg_color = "#1a252c"
+        args.map_fill = "#2d3436"
+        args.map_border = "#576574"
+        args.point_color = "#ff7675"
+        args.label_color = "white"
+        args.label_outline = "black"
+        args.tick_color = "#b2bec3"
+        args.map_point_color = "#636e72"
+        args.map_label_color = "#7f8c8d"
+        args.map_label_outline = "#2d3436"
+        args.water_label_color = "#2c3e50"
+        args.map_label_size = 11.0
+    else:
+        args.bg_color = "#e0f3f8"
+        args.map_fill = "#fefee9"
+        args.map_border = "#7f8c8d"
+        args.point_color = "#e74c3c"
+        args.label_color = "black"
+        args.label_outline = "white"
+        args.tick_color = "black"
+        args.map_point_color = "#95a5a6"
+        args.map_label_color = "#2980b9"
+        args.map_label_outline = "white"
+        args.water_label_color = "#95c5d8"
 
     # Find geojson if not specified
     geojson_path = args.geojson
@@ -837,49 +843,6 @@ def main():
                         groups_present.add(group)
                 except (ValueError, KeyError):
                     continue
-        if points:
-            lons = [p["lon"] for p in points]
-            lats = [p["lat"] for p in points]
-            # Ensure we don't accidentally restrict bounds if the user specified them
-            if args.lat_min is None: args.lat_min = min(lats)
-            if args.lat_max is None: args.lat_max = max(lats)
-            if args.lon_min is None: args.lon_min = min(lons)
-            if args.lon_max is None: args.lon_max = max(lons)
-
-        if groups_present:
-            from collections import Counter
-            group_counts = Counter(p["group"] for p in points if p.get("group"))
-            
-            if len(group_counts) > 9:
-                top_groups = set(g for g, _ in group_counts.most_common(9))
-                for p in points:
-                    if p.get("group") and p["group"] not in top_groups:
-                        p["group"] = "Other"
-                # Recalculate after combining into 'Other'
-                group_counts = Counter(p["group"] for p in points if p.get("group"))
-                
-            # Rename groups to include their point count
-            group_name_map = {}
-            for g, count in group_counts.items():
-                group_name_map[g] = f"{g} ({count})"
-                
-            for p in points:
-                if p.get("group"):
-                    p["group"] = group_name_map[p["group"]]
-                    
-            groups_present = set(group_name_map.values())
-            other_mapped = group_name_map.get("Other")
-                        
-            # tab10 is explicitly designed for 10 highly distinct categorical colors
-            cmap = matplotlib.colormaps['tab10']
-            colors = [matplotlib.colors.to_hex(cmap(i)) for i in range(10)]
-            
-            sorted_groups = sorted([g for g in groups_present if g != other_mapped])
-            for i, g in enumerate(sorted_groups):
-                group_colors[g] = colors[i]
-                
-            if other_mapped:
-                group_colors[other_mapped] = "#bdc3c7" # Neutral grey
     else:
         if args.seed is not None:
             random.seed(args.seed)
@@ -895,7 +858,53 @@ def main():
             args.lon_max = center_lon + lon_spread / 2.0
             print(f"Random region selected: Lat [{args.lat_min:.2f}, {args.lat_max:.2f}], Lon [{args.lon_min:.2f}, {args.lon_max:.2f}]")
         points = generate_points(args.num_points, args.lat_min, args.lat_max, args.lon_min, args.lon_max)
+        for p in points:
+            if p.get("group"):
+                groups_present.add(p["group"])
 
+    if points:
+        lons = [p["lon"] for p in points]
+        lats = [p["lat"] for p in points]
+        # Ensure we don't accidentally restrict bounds if the user specified them
+        if args.lat_min is None: args.lat_min = min(lats)
+        if args.lat_max is None: args.lat_max = max(lats)
+        if args.lon_min is None: args.lon_min = min(lons)
+        if args.lon_max is None: args.lon_max = max(lons)
+
+    if groups_present:
+        from collections import Counter
+        group_counts = Counter(p["group"] for p in points if p.get("group"))
+
+        if len(group_counts) > 9:
+            top_groups = set(g for g, _ in group_counts.most_common(9))
+            for p in points:
+                if p.get("group") and p["group"] not in top_groups:
+                    p["group"] = "Other"
+            # Recalculate after combining into 'Other'
+            group_counts = Counter(p["group"] for p in points if p.get("group"))
+
+        # Rename groups to include their point count
+        group_name_map = {}
+        for g, count in group_counts.items():
+            group_name_map[g] = f"{g} ({count})"
+
+        for p in points:
+            if p.get("group"):
+                p["group"] = group_name_map[p["group"]]
+
+        groups_present = set(group_name_map.values())
+        other_mapped = group_name_map.get("Other")
+
+        # tab10 is explicitly designed for 10 highly distinct categorical colors
+        cmap = matplotlib.colormaps['tab10']
+        colors = [matplotlib.colors.to_hex(cmap(i)) for i in range(10)]
+
+        sorted_groups = sorted([g for g in groups_present if g != other_mapped])
+        for i, g in enumerate(sorted_groups):
+            group_colors[g] = colors[i]
+
+        if other_mapped:
+            group_colors[other_mapped] = "#bdc3c7" # Neutral grey
 
     # Plot
     plot_map(points, geojson_path, args, group_colors)
