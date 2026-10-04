@@ -71,7 +71,8 @@ If the CSV uses non-standard column headers, map them directly:
 * `--csv-group`: Categorical grouping column name
 
 ## Data Credits
-* **Map Data**: Geographic boundary vectors (Land, Water, Rivers) are derived from the excellent open-source datasets provided by [Natural Earth](https://www.naturalearthdata.com/).
+* **Land/Water Data**: Geographic boundary vectors are derived from the excellent open-source datasets provided by [Natural Earth](https://www.naturalearthdata.com/).
+* **River Data**: Water data derived from [World Bank Group data catalog](https://datacatalog.worldbank.org/)
 * **Color Palettes**: Categorical group colors utilize the `Set3` qualitative color palette sourced from `matplotlib` (originally derived from ColorBrewer).
 
 ## License

@@ -673,7 +673,8 @@ def plot_map(points, geojson_path, args, group_colors=None):
     # Add Legend
     legend_elements = []
     if group_colors:
-        for g in sorted(group_colors.keys()):
+        sorted_keys = sorted(group_colors.keys(), key=lambda g: (g.startswith('Other'), g))
+        for g in sorted_keys:
             legend_elements.append(mlines.Line2D([0], [0], linestyle='none', marker=args.marker, color='w', markerfacecolor=group_colors[g], markersize=8, markeredgecolor='black', label=g))
     elif not getattr(args, "csv", ""):
         legend_elements.append(mlines.Line2D([0], [0], linestyle='none', marker=args.marker, color='w', markerfacecolor=args.point_color, markersize=8, markeredgecolor='black', label='Generated Points'))
@@ -846,10 +847,39 @@ def main():
             if args.lon_max is None: args.lon_max = max(lons)
 
         if groups_present:
-            cmap = matplotlib.colormaps['Set3']
-            colors = [matplotlib.colors.to_hex(cmap(i/11.0)) for i in range(12)]
-            for i, g in enumerate(sorted(groups_present)):
-                group_colors[g] = colors[i % len(colors)]
+            from collections import Counter
+            group_counts = Counter(p["group"] for p in points if p.get("group"))
+            
+            if len(group_counts) > 9:
+                top_groups = set(g for g, _ in group_counts.most_common(9))
+                for p in points:
+                    if p.get("group") and p["group"] not in top_groups:
+                        p["group"] = "Other"
+                # Recalculate after combining into 'Other'
+                group_counts = Counter(p["group"] for p in points if p.get("group"))
+                
+            # Rename groups to include their point count
+            group_name_map = {}
+            for g, count in group_counts.items():
+                group_name_map[g] = f"{g} ({count})"
+                
+            for p in points:
+                if p.get("group"):
+                    p["group"] = group_name_map[p["group"]]
+                    
+            groups_present = set(group_name_map.values())
+            other_mapped = group_name_map.get("Other")
+                        
+            # tab10 is explicitly designed for 10 highly distinct categorical colors
+            cmap = matplotlib.colormaps['tab10']
+            colors = [matplotlib.colors.to_hex(cmap(i)) for i in range(10)]
+            
+            sorted_groups = sorted([g for g in groups_present if g != other_mapped])
+            for i, g in enumerate(sorted_groups):
+                group_colors[g] = colors[i]
+                
+            if other_mapped:
+                group_colors[other_mapped] = "#bdc3c7" # Neutral grey
     else:
         if args.seed is not None:
             random.seed(args.seed)
