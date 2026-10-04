@@ -19,6 +19,7 @@ from matplotlib.path import Path
 from matplotlib.patches import PathPatch
 from matplotlib.transforms import Bbox
 from matplotlib.offsetbox import OffsetImage, AnnotationBbox
+import matplotlib.patches as patches
 import textwrap
 
 def generate_points(n, lat_min, lat_max, lon_min, lon_max):
@@ -31,6 +32,74 @@ def generate_points(n, lat_min, lat_max, lon_min, lon_max):
         value = random.randint(100, 1000)
         points.append({"lon": lon, "lat": lat, "name": name, "value": value})
     return points
+
+def add_compass_rose(ax, loc, color):
+    compass_ax = ax.inset_axes(loc)
+    compass_ax.axis('off')
+    compass_ax.set_aspect('equal')
+    compass_ax.set_xlim(-1.2, 1.2)
+    compass_ax.set_ylim(-1.2, 1.2)
+
+    compass_ax.fill([0, 0.2, 0], [0, 0, 1], color=color, zorder=2)
+    compass_ax.fill([0, -0.2, 0], [0, 0, 1], color=color, alpha=0.5, zorder=2)
+    compass_ax.fill([0, 0.2, 0], [0, 0, -1], color=color, alpha=0.5, zorder=2)
+    compass_ax.fill([0, -0.2, 0], [0, 0, -1], color=color, zorder=2)
+    compass_ax.fill([0, 1, 0], [0, 0.2, 0], color=color, zorder=2)
+    compass_ax.fill([0, 1, 0], [0, -0.2, 0], color=color, alpha=0.5, zorder=2)
+    compass_ax.fill([0, -1, 0], [0, 0.2, 0], color=color, alpha=0.5, zorder=2)
+    compass_ax.fill([0, -1, 0], [0, -0.2, 0], color=color, zorder=2)
+
+    compass_ax.text(0, 1.25, 'N', ha='center', va='center', fontsize=12, fontweight='bold', color=color)
+    compass_ax.text(0, -1.25, 'S', ha='center', va='center', fontsize=9, fontweight='bold', color=color)
+    compass_ax.text(1.25, 0, 'E', ha='center', va='center', fontsize=9, fontweight='bold', color=color)
+    compass_ax.text(-1.25, 0, 'W', ha='center', va='center', fontsize=9, fontweight='bold', color=color)
+
+def add_minimap(ax, geojson_path, view_bbox, args, loc):
+    ref_ax = ax.inset_axes(loc)
+    ref_ax.set_aspect('equal')
+    ref_ax.axis('off')
+
+    circle_bg = patches.Circle((0.5, 0.5), 0.5, transform=ref_ax.transAxes, facecolor=args.bg_color, edgecolor=args.map_border, linewidth=1.5, zorder=0)
+    ref_ax.add_patch(circle_bg)
+
+    try:
+        with open(geojson_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        patch_list = []
+        for feat in data.get("features", []):
+            geom = feat.get("geometry")
+            if not geom: continue
+            gtype = geom.get("type")
+            coords = geom.get("coordinates")
+            if gtype in ("Polygon", "MultiPolygon"):
+                coords_list = [coords] if gtype == "Polygon" else coords
+                for poly in coords_list:
+                    if not poly: continue
+                    r_arr = np.array(poly[0])
+                    patch_list.append(patches.Polygon(r_arr))
+
+        from matplotlib.collections import PatchCollection
+        pc = PatchCollection(patch_list, facecolor=args.map_fill, edgecolor='none', alpha=0.9, zorder=1)
+        pc.set_clip_path(circle_bg)
+        ref_ax.add_collection(pc)
+    except Exception as e:
+        print(f"Minimap error: {e}")
+
+    min_lon, min_lat, max_lon, max_lat = view_bbox
+    box_x = [min_lon, max_lon, max_lon, min_lon, min_lon]
+    box_y = [min_lat, min_lat, max_lat, max_lat, min_lat]
+
+    box_line, = ref_ax.plot(box_x, box_y, color='red', linewidth=1.5, zorder=2)
+    box_line.set_clip_path(circle_bg)
+
+    if (max_lon - min_lon) < 15:
+        dot = ref_ax.scatter([(min_lon + max_lon) / 2], [(min_lat + max_lat) / 2], color='red', s=15, zorder=3)
+        dot.set_clip_path(circle_bg)
+
+    ref_ax.set_xlim(-180, 180)
+    ref_ax.set_ylim(-90, 90)
+
 
 MERCATOR_MAX = 20037508.34
 
@@ -93,23 +162,23 @@ def plot_geojson_layer(geojson_path, view_bbox, ax, args, merc_bounds, layer_typ
     try:
         with open(geojson_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
-            
+
         features = data.get("features", [])
         print(f"Total features in {'water' if is_water else 'map'} geojson: {len(features)}")
-        
+
         plotted_features = 0
         for feat in features:
             f_bbox = feat.get("bbox")
             if not f_bbox:
                 f_bbox = get_feature_bbox(feat)
-                
+
             if f_bbox and not bbox_intersects(f_bbox, view_bbox):
                 continue
-                
+
             geom = feat.get("geometry")
             if not geom:
                 continue
-                
+
             gtype = geom.get("type")
             coords = geom.get("coordinates")
             props = feat.get("properties", {})
@@ -118,10 +187,10 @@ def plot_geojson_layer(geojson_path, view_bbox, ax, args, merc_bounds, layer_typ
                 name = props.get("name_en", "") # fallback
             if not name:
                 name = props.get("NAME", "") # fallback for rivers
-                
+
             if name:
                 name = textwrap.fill(name, width=12)
-            
+
             paths = []
             if gtype in ("Polygon", "MultiPolygon"):
                 coords_list = [coords] if gtype == "Polygon" else coords
@@ -132,7 +201,7 @@ def plot_geojson_layer(geojson_path, view_bbox, ax, args, merc_bounds, layer_typ
                         if fill_res:
                             ax.add_patch(fill_res[0])
                             paths.append(fill_res[1])
-                            
+
                         # Add independent borders using ax.plot for 100% reliability
                         for ring in poly_coords:
                             if not ring: continue
@@ -158,14 +227,14 @@ def plot_geojson_layer(geojson_path, view_bbox, ax, args, merc_bounds, layer_typ
                     if is_vis:
                         ax.plot(x, y, color=args.bg_color, linewidth=1.5, zorder=2)
                         paths.append(Path(np.column_stack((x, y))))
-                        
+
             # Check actual visibility
             view_bbox_merc = Bbox.from_extents(merc_min_x, merc_min_y, merc_max_x, merc_max_y)
             is_visible = any(p.intersects_bbox(view_bbox_merc) for p in paths)
-            
+
             if not is_visible and layer_type != "feature":
                 continue
-            
+
             # Plot Polygon labels
             if is_river and name and args.show_map_labels:
                 best_len = 0
@@ -175,18 +244,18 @@ def plot_geojson_layer(geojson_path, view_bbox, ax, args, merc_bounds, layer_typ
                     if len(verts) < 2: continue
                     x1, y1 = verts[:-1, 0], verts[:-1, 1]
                     x2, y2 = verts[1:, 0], verts[1:, 1]
-                    
+
                     in_bnds = ((x1 >= merc_min_x) & (x1 <= merc_max_x) & (y1 >= merc_min_y) & (y1 <= merc_max_y)) | \
                               ((x2 >= merc_min_x) & (x2 <= merc_max_x) & (y2 >= merc_min_y) & (y2 <= merc_max_y))
-                              
+
                     if not np.any(in_bnds): continue
-                    
+
                     dists = np.where(in_bnds, np.hypot(x2 - x1, y2 - y1), 0)
                     max_idx = np.argmax(dists)
                     if dists[max_idx] > best_len:
                         best_len = dists[max_idx]
                         best_seg = (verts[max_idx], verts[max_idx+1])
-                
+
                 if best_seg and best_len > (merc_max_x - merc_min_x) * 0.02:
                     p1, p2 = best_seg
                     mid_x = (p1[0] + p2[0]) / 2.0
@@ -194,33 +263,33 @@ def plot_geojson_layer(geojson_path, view_bbox, ax, args, merc_bounds, layer_typ
                     angle = math.degrees(math.atan2(p2[1]-p1[1], p2[0]-p1[0]))
                     if angle > 90: angle -= 180
                     elif angle < -90: angle += 180
-                    
+
                     label_color = args.water_label_color
                     txt = ax.text(mid_x, mid_y, name, fontsize=6.5, fontweight='bold', fontstyle='italic',
-                                  color=label_color, ha='center', va='center', rotation=angle, 
+                                  color=label_color, ha='center', va='center', rotation=angle,
                                   zorder=2, clip_on=True, alpha=0.85)
 
             elif gtype in ("Polygon", "MultiPolygon") and name and args.show_map_labels:
                 best_path = None
                 max_vis_diag = 0
                 best_min_vx = best_max_vx = best_min_vy = best_max_vy = 0
-                
+
                 for p in paths:
                     if len(p.vertices) == 0: continue
                     vx = p.vertices[:, 0]
                     vy = p.vertices[:, 1]
-                    
+
                     p_min_x, p_max_x = np.min(vx), np.max(vx)
                     p_min_y, p_max_y = np.min(vy), np.max(vy)
-                    
+
                     p_min_vx = max(merc_min_x, p_min_x)
                     p_max_vx = min(merc_max_x, p_max_x)
                     p_min_vy = max(merc_min_y, p_min_y)
                     p_max_vy = min(merc_max_y, p_max_y)
-                    
+
                     if p_max_vx <= p_min_vx or p_max_vy <= p_min_vy:
                         continue
-                        
+
                     vis_diag = math.hypot(p_max_vx - p_min_vx, p_max_vy - p_min_vy)
                     if vis_diag > max_vis_diag:
                         max_vis_diag = vis_diag
@@ -229,36 +298,36 @@ def plot_geojson_layer(geojson_path, view_bbox, ax, args, merc_bounds, layer_typ
 
                 if not best_path:
                     continue
-                    
+
                 min_vx, max_vx, min_vy, max_vy = best_min_vx, best_max_vx, best_min_vy, best_max_vy
-                
+
                 pref_x = props.get("label_x")
                 pref_y = props.get("label_y")
                 use_pref = pref_x is not None and pref_y is not None and \
                            view_bbox[0] <= pref_x <= view_bbox[2] and view_bbox[1] <= pref_y <= view_bbox[3]
-                           
+
                 if not use_pref:
                     if (max_vx - min_vx) < (merc_max_x - merc_min_x) * 0.05 and \
                        (max_vy - min_vy) < (merc_max_y - merc_min_y) * 0.05:
                         continue
-                
+
                 target_mx = (min_vx + max_vx) / 2.0
                 target_my = (min_vy + max_vy) / 2.0
-                
+
                 IX, IY = np.meshgrid(np.linspace(0, 1, 20), np.linspace(0, 1, 20))
                 px = min_vx + (max_vx - min_vx) * IX.flatten()
                 py = min_vy + (max_vy - min_vy) * IY.flatten()
                 pts = np.column_stack((px, py))
-                
+
                 contains = best_path.contains_points(pts)
                 valid_pts = pts[contains]
                 invalid_pts = pts[~contains]
-                
+
                 best_pt = None
                 if len(valid_pts) > 0:
                     vx = valid_pts[:, 0]
                     vy = valid_pts[:, 1]
-                    
+
                     if len(invalid_pts) > 0:
                         ix_pts = invalid_pts[:, 0]
                         iy_pts = invalid_pts[:, 1]
@@ -267,25 +336,25 @@ def plot_geojson_layer(geojson_path, view_bbox, ax, args, merc_bounds, layer_typ
                         dist_sq_to_inv = np.min(diff_x**2 + diff_y**2, axis=1)
                     else:
                         dist_sq_to_inv = np.full(len(valid_pts), float('inf'))
-                        
+
                     dist_sq_to_edge = np.minimum.reduce([
-                        (vx - min_vx)**2, 
-                        (vx - max_vx)**2, 
-                        (vy - min_vy)**2, 
+                        (vx - min_vx)**2,
+                        (vx - max_vx)**2,
+                        (vy - min_vy)**2,
                         (vy - max_vy)**2
                     ])
-                    
+
                     min_safe_dist = np.minimum(dist_sq_to_inv, dist_sq_to_edge)
                     center_dist = (vx - target_mx)**2 + (vy - target_my)**2
                     scores = min_safe_dist - center_dist * 0.05
-                    
+
                     best_idx = np.argmax(scores)
                     best_pt = (vx[best_idx], vy[best_idx])
-                
+
                 anchor_mx, anchor_my = target_mx, target_my
                 if best_pt:
                     anchor_mx, anchor_my = best_pt
-                    
+
                 if use_pref:
                     text_mx, text_my = lonlat_to_merc(pref_x, pref_y)
                 else:
@@ -294,17 +363,17 @@ def plot_geojson_layer(geojson_path, view_bbox, ax, args, merc_bounds, layer_typ
 
                 label_color = args.water_label_color if is_water else args.map_label_color
                 label_size = args.water_label_size if is_water else args.map_label_size
-                
+
                 poly_width = max_vx - min_vx
                 poly_height = max_vy - min_vy
                 view_width = merc_max_x - merc_min_x
                 view_height = merc_max_y - merc_min_y
-                
+
                 if view_width > 0 and view_height > 0:
                     poly_diag = math.hypot(poly_width, poly_height)
                     view_diag = math.hypot(view_width, view_height)
                     ratio = poly_diag / view_diag
-                    
+
                     if is_water:
                         if ratio < 0.25:
                             label_size = max(6.0, label_size * (ratio / 0.25))
@@ -314,19 +383,19 @@ def plot_geojson_layer(geojson_path, view_bbox, ax, args, merc_bounds, layer_typ
 
                 font_style = 'italic' if is_water else 'normal'
                 alpha_val = 0.6 if is_water else 0.85
-                
+
                 txt = ax.text(text_mx, text_my, name, fontsize=label_size, fontweight='bold', fontstyle=font_style,
                               color=label_color, ha='center', va='center', alpha=alpha_val, zorder=4, clip_on=True)
-                
+
                 if not is_water:
                     txt.set_path_effects([PathEffects.withStroke(linewidth=3.0, foreground=args.map_label_outline)])
-                
+
                 # Leader lines
                 if not is_water:
                     is_inside = any(p.contains_point((text_mx, text_my)) for p in paths)
                     if not is_inside and best_pt is not None:
-                        ax.plot([text_mx, anchor_mx], [text_my, anchor_my], 
-                                color=label_color, linestyle='--', linewidth=1.5, alpha=0.7, zorder=1)
+                        ax.plot([text_mx, anchor_mx], [text_my, anchor_my],
+                                color=label_color, linestyle='--', linewidth=1.5, alpha=0.9, zorder=1)
                         ax.plot(anchor_mx, anchor_my, marker='o', color=label_color, markersize=4.0, alpha=0.8, zorder=1)
             elif gtype == "Point" and layer_type == "feature":
                 import os
@@ -345,16 +414,16 @@ def plot_geojson_layer(geojson_path, view_bbox, ax, args, merc_bounds, layer_typ
                             img[:, :, 0] = min(1.0, r * factor)
                             img[:, :, 1] = min(1.0, g * factor)
                             img[:, :, 2] = min(1.0, b * factor)
-                        
+
                         imagebox = OffsetImage(img, zoom=0.10, alpha=0.8)
                         ab = AnnotationBbox(imagebox, (mx, my), frameon=False, zorder=6)
                         ax.add_artist(ab)
                     else:
                         ax.plot(mx, my, marker='*', color=args.map_label_color, markersize=4.0, zorder=6)
-                        
+
                     if name:
                         y_offset = (merc_max_y - merc_min_y) * 0.012
-                        txt = ax.text(mx, my - y_offset, name, fontsize=5, fontweight='normal', 
+                        txt = ax.text(mx, my - y_offset, name, fontsize=5, fontweight='normal',
                                       color=args.map_label_color, ha='center', va='top', zorder=6, clip_on=True)
                         txt.set_path_effects([PathEffects.withStroke(linewidth=1.5, foreground=args.bg_color)])
             elif gtype == "LineString" and layer_type == "feature":
@@ -363,7 +432,7 @@ def plot_geojson_layer(geojson_path, view_bbox, ax, args, merc_bounds, layer_typ
                 is_vis = np.any((x >= merc_min_x) & (x <= merc_max_x) & (y >= merc_min_y) & (y <= merc_max_y))
                 if is_vis:
                     ax.plot(x, y, color=args.tick_color, linewidth=1.0, linestyle='--', alpha=0.4, zorder=5)
-                    
+
                     if name:
                         mid_idx = len(x) // 2
                         p1 = (x[mid_idx-1], y[mid_idx-1])
@@ -373,9 +442,9 @@ def plot_geojson_layer(geojson_path, view_bbox, ax, args, merc_bounds, layer_typ
                         angle = math.degrees(math.atan2(p2[1]-p1[1], p2[0]-p1[0]))
                         if angle > 90: angle -= 180
                         elif angle < -90: angle += 180
-                        
+
                         txt = ax.text(mid_x, mid_y, name, fontsize=6, fontweight='bold', fontstyle='italic',
-                                      color=args.tick_color, ha='center', va='bottom', rotation=angle, 
+                                      color=args.tick_color, ha='center', va='bottom', rotation=angle,
                                       zorder=5, clip_on=True, alpha=0.6)
                         txt.set_path_effects([PathEffects.withStroke(linewidth=2.0, foreground=args.bg_color)])
             elif gtype == "Point" and not is_water:
@@ -388,9 +457,9 @@ def plot_geojson_layer(geojson_path, view_bbox, ax, args, merc_bounds, layer_typ
                 for c in coords:
                     mx, my = lonlat_to_merc(c[0], c[1])
                     ax.plot(mx, my, marker='o', color=args.map_point_color, markersize=args.map_point_size)
-            
+
             plotted_features += 1
-            
+
         print(f"Filtered and plotted {plotted_features} features within the map bounds.")
     except Exception as e:
         print(f"Error reading or plotting geojson: {e}")
@@ -399,53 +468,53 @@ def plot_map(points, geojson_path, args, group_colors=None):
     # Calculate bounding box of generated points
     lons = [p["lon"] for p in points]
     lats = [p["lat"] for p in points]
-    
+
     min_lon, max_lon = min(lons), max(lons)
     min_lat, max_lat = min(lats), max(lats)
-    
+
     # Add margin
     margin_lon = (max_lon - min_lon) * args.margin if max_lon > min_lon else args.margin
     margin_lat = (max_lat - min_lat) * args.margin if max_lat > min_lat else args.margin
     # Ensure minimum margin
     margin_lon = max(margin_lon, args.min_margin)
     margin_lat = max(margin_lat, args.min_margin)
-    
+
     view_bbox = (min_lon - margin_lon, min_lat - margin_lat, max_lon + margin_lon, max_lat + margin_lat)
-    
+
     # Project view bbox to Mercator and enforce 2:1 map ratio
     merc_min_x, merc_min_y = lonlat_to_merc(view_bbox[0], view_bbox[1])
     merc_max_x, merc_max_y = lonlat_to_merc(view_bbox[2], view_bbox[3])
-    
+
     merc_width = merc_max_x - merc_min_x
     merc_height = merc_max_y - merc_min_y
     merc_min_x = max(-MERCATOR_MAX, merc_min_x)
     merc_max_x = min(MERCATOR_MAX, merc_max_x)
     merc_min_y = max(-MERCATOR_MAX, merc_min_y)
     merc_max_y = min(MERCATOR_MAX, merc_max_y)
-    
+
     # Update view_bbox so that MBTiles and GeoJSON filters use the padded area
     new_min_lon, new_min_lat = merc_to_lonlat(merc_min_x, merc_min_y)
     new_max_lon, new_max_lat = merc_to_lonlat(merc_max_x, merc_max_y)
     view_bbox = (new_min_lon, new_min_lat, new_max_lon, new_max_lat)
-    
+
     # Better fonts
     plt.rcParams['font.family'] = 'sans-serif'
     plt.rcParams['font.sans-serif'] = ['Trebuchet MS', 'Verdana', 'Tahoma', 'DejaVu Sans', 'Arial', 'sans-serif']
-    
+
     # Calculate map dimensions and target aspect ratios
     merc_width = merc_max_x - merc_min_x
     merc_height = merc_max_y - merc_min_y
     data_ratio = merc_width / merc_height if merc_height > 0 else 2.0
-    
+
     left_margin, right_margin = 0.04, 0.96
     bottom_margin, top_margin = 0.05, 0.97
     if not getattr(args, "show_axis_ticks", True):
         left_margin, bottom_margin = 0.02, 0.02
         right_margin, top_margin = 0.98, 0.98
-        
+
     ax_width_frac = right_margin - left_margin
     ax_height_frac = top_margin - bottom_margin
-    
+
     if getattr(args, "fit_mode", "normal") == "dynamic":
         target_image_ratio = data_ratio / (ax_width_frac / ax_height_frac)
         h_if_w_fixed = args.width / target_image_ratio
@@ -459,10 +528,10 @@ def plot_map(points, geojson_path, args, group_colors=None):
         # normal mode: exact fixed width and height, pad map to fit
         dynamic_width = args.width
         dynamic_height = args.height
-        
+
         target_image_ratio = args.width / args.height
         target_data_ratio = target_image_ratio * (ax_width_frac / ax_height_frac)
-        
+
         if data_ratio < target_data_ratio:
             required_merc_width = merc_height * target_data_ratio
             padding_x = (required_merc_width - merc_width) / 2.0
@@ -473,20 +542,20 @@ def plot_map(points, geojson_path, args, group_colors=None):
             padding_y = (required_merc_height - merc_height) / 2.0
             merc_min_y -= padding_y
             merc_max_y += padding_y
-            
+
         merc_min_x = max(-MERCATOR_MAX, merc_min_x)
         merc_max_x = min(MERCATOR_MAX, merc_max_x)
         merc_min_y = max(-MERCATOR_MAX, merc_min_y)
         merc_max_y = min(MERCATOR_MAX, merc_max_y)
-        
+
         # update view bbox based on padded area
         new_min_lon, new_min_lat = merc_to_lonlat(merc_min_x, merc_min_y)
         new_max_lon, new_max_lat = merc_to_lonlat(merc_max_x, merc_max_y)
         view_bbox = (new_min_lon, new_min_lat, new_max_lon, new_max_lat)
-        
+
     args.width = dynamic_width
     args.height = dynamic_height
-    
+
     fig, ax = plt.subplots(figsize=(args.width, args.height))
     fig.subplots_adjust(left=left_margin, right=right_margin, bottom=bottom_margin, top=top_margin)
     # Aspect ratio is simply equal for Mercator
@@ -495,25 +564,25 @@ def plot_map(points, geojson_path, args, group_colors=None):
     fig.patch.set_facecolor(fig_bg)
     ax.set_facecolor(args.bg_color)
     ax.patch.set_zorder(-1)
-    
-        
+
+
     # Read geojson layers
     merc_bounds = (merc_min_x, merc_min_y, merc_max_x, merc_max_y)
-    
+
     if geojson_path:
         print(f"Loading map data from {geojson_path}...")
         plot_geojson_layer(geojson_path, view_bbox, ax, args, merc_bounds, layer_type="land")
-        
+
     if getattr(args, "water_data", None):
         print(f"Loading water data from {args.water_data}...")
         plot_geojson_layer(args.water_data, view_bbox, ax, args, merc_bounds, layer_type="water")
-        
+
     if getattr(args, "rivers_data", None):
         import os
         if os.path.exists(args.rivers_data):
             print(f"Loading rivers data from {args.rivers_data}...")
             plot_geojson_layer(args.rivers_data, view_bbox, ax, args, merc_bounds, layer_type="river")
-            
+
     if getattr(args, "features_data", None):
         import os
         if os.path.exists(args.features_data):
@@ -523,22 +592,22 @@ def plot_map(points, geojson_path, args, group_colors=None):
                 target_tiles = 4.0
                 map_zoom = int(round(math.log2(360.0 * target_tiles / lon_span)))
                 map_zoom = max(0, map_zoom)
-                
+
             if map_zoom >= args.features_min_zoom:
                 print(f"Loading features data from {args.features_data} (zoom level {map_zoom} >= {args.features_min_zoom})...")
                 plot_geojson_layer(args.features_data, view_bbox, ax, args, merc_bounds, layer_type="feature")
             else:
                 print(f"Skipping features data (zoom level {map_zoom} < {args.features_min_zoom}).")
-    
+
     # Plot generated points
     for i, p in enumerate(points):
         lon, lat = p["lon"], p["lat"]
         mx, my = lonlat_to_merc(lon, lat)
-        
+
         color = args.point_color
         if group_colors and p.get("group") in group_colors:
             color = group_colors[p["group"]]
-            
+
         ax.plot(mx, my, marker=args.marker, color=color, markersize=args.point_size, markeredgecolor='black', markeredgewidth=1.0, zorder=5)
         # Label generated points
         if args.show_labels and p.get('name'):
@@ -548,14 +617,14 @@ def plot_map(points, geojson_path, args, group_colors=None):
             y_offset = (merc_max_y - merc_min_y) * 0.015
             txt = ax.text(mx, my + y_offset, label, fontsize=8, fontweight='normal', color=args.label_color, ha='center', va='bottom', zorder=6, clip_on=True)
             txt.set_path_effects([PathEffects.withStroke(linewidth=1.0, foreground=args.label_outline)])
-    
+
 
     # Add Scale Bar
     center_lat = (args.lat_min + args.lat_max) / 2.0
     lon_span = new_max_lon - new_min_lon
     view_width_m = lon_span * math.cos(math.radians(center_lat)) * 111320
     view_width_nm = view_width_m / 1852.0
-    
+
     target_scale_nm = view_width_nm * 0.10
     magnitude = 10 ** math.floor(math.log10(max(1, target_scale_nm))) if target_scale_nm > 0 else 1
     normalized = target_scale_nm / magnitude
@@ -563,17 +632,17 @@ def plot_map(points, geojson_path, args, group_colors=None):
     elif normalized < 5: nice_val = 2
     else: nice_val = 5
     scale_nm = max(1, int(nice_val * magnitude))
-    
+
     scale_label = f"{scale_nm} NM"
     deg_span = (scale_nm * 1852.0) / (math.cos(math.radians(center_lat)) * 111320)
     merc_span = deg_span * MERCATOR_MAX / 180.0
-    
+
     sb_color = "#7f8c8d" if not getattr(args, "dark_mode", False) else "#b2bec3"
-    
+
     # Bottom right corner for scale bar (tucked closer to edge: 0.5%)
     sb_x = merc_max_x - (merc_max_x - merc_min_x) * 0.005
     sb_y = merc_min_y + (merc_max_y - merc_min_y) * 0.025
-    
+
     ax.plot([sb_x - merc_span, sb_x], [sb_y, sb_y], color=sb_color, linewidth=1.2, zorder=10)
     ax.plot([sb_x - merc_span, sb_x - merc_span], [sb_y - (merc_max_y - merc_min_y)*0.003, sb_y + (merc_max_y - merc_min_y)*0.003], color=sb_color, linewidth=1.0, zorder=10)
     ax.plot([sb_x, sb_x], [sb_y - (merc_max_y - merc_min_y)*0.003, sb_y + (merc_max_y - merc_min_y)*0.003], color=sb_color, linewidth=1.0, zorder=10)
@@ -591,18 +660,18 @@ def plot_map(points, geojson_path, args, group_colors=None):
             legend_elements.append(mlines.Line2D([0], [0], linestyle='none', marker=args.marker, color='w', markerfacecolor=group_colors[g], markersize=8, markeredgecolor='black', label=g))
     elif not getattr(args, "csv", ""):
         legend_elements.append(mlines.Line2D([0], [0], linestyle='none', marker=args.marker, color='w', markerfacecolor=args.point_color, markersize=8, markeredgecolor='black', label='Generated Points'))
-        
+
     if legend_elements:
         ax.legend(handles=legend_elements, loc='lower left', bbox_to_anchor=(0.005, 0.006), borderaxespad=0, fontsize=9, framealpha=0.85, facecolor=args.bg_color, edgecolor=args.map_border, labelcolor=args.label_color)
 
     ax.set_xlim(merc_min_x, merc_max_x)
     ax.set_ylim(merc_min_y, merc_max_y)
-    
+
     if args.show_axis_ticks:
         ax.grid(True, linestyle='--', alpha=0.4, color=args.map_border)
         ax.set_xlabel("Longitude", fontsize=10, fontweight='bold', color=args.tick_color)
         ax.set_ylabel("Latitude", fontsize=10, fontweight='bold', color=args.tick_color)
-        
+
         @ticker.FuncFormatter
         def lon_formatter(x, pos):
             lon, _ = merc_to_lonlat(x, 0)
@@ -622,11 +691,16 @@ def plot_map(points, geojson_path, args, group_colors=None):
         # Make it look like a map by removing standard axes
         ax.set_xticks([])
         ax.set_yticks([])
-        
+
     for spine in ax.spines.values():
         spine.set_edgecolor(args.map_border)
         spine.set_linewidth(2)
-        
+
+    compass_color = "#34495e" if not getattr(args, "dark_mode", False) else "#b2bec3"
+    add_compass_rose(ax, loc=[0.02, 0.88, 0.08, 0.08], color=compass_color)
+    if geojson_path:
+        add_minimap(ax, geojson_path, view_bbox, args, loc=[0.88, 0.87, 0.10, 0.10])
+
     if args.title:
         plt.title(args.title, fontsize=18, fontweight='bold', color='#2c3e50', pad=20)
     plt.savefig(args.output, dpi=args.dpi)
@@ -637,7 +711,7 @@ def main():
     PKG_DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 
     parser = argparse.ArgumentParser(description="Generate lat/lon points and plot them on a map using local GeoJSON.")
-    
+
     # Input/Output
     parser.add_argument("-o", "--output", type=str, default="/tmp/map.png", help="Output image filename")
     parser.add_argument("--geojson", type=str, default=os.path.join(PKG_DATA_DIR, "world.geojson"), help="Path to GeoJSON file.")
@@ -645,7 +719,7 @@ def main():
     parser.add_argument("--rivers-data", type=str, default=os.path.join(PKG_DATA_DIR, "rivers.geojson"), help="Path to rivers GeoJSON file")
     parser.add_argument("--features-data", type=str, default=os.path.join(PKG_DATA_DIR, "features.geojson"), help="Path to features GeoJSON file")
     parser.add_argument("--features-min-zoom", type=int, default=6, help="Minimum zoom level to display features (0=world, higher=closer)")
-    
+
     # Point Generation
     parser.add_argument("--csv", type=str, default="", help="Path to CSV file with points")
     parser.add_argument("--csv-lat", type=str, default="", help="CSV latitude column")
@@ -658,7 +732,7 @@ def main():
     parser.add_argument("--lon-min", type=float, default=None, help="Min longitude for point generation")
     parser.add_argument("--lon-max", type=float, default=None, help="Max longitude for point generation")
     parser.add_argument("--seed", type=int, default=None, help="Random seed for point generation")
-    
+
     # Map Styling
     parser.add_argument("--margin", type=float, default=0.1, help="Margin around points (fraction of width/height)")
     parser.add_argument("--min-margin", type=float, default=1.0, help="Minimum margin in degrees")
@@ -667,7 +741,7 @@ def main():
     parser.add_argument("--fit-mode", choices=["normal", "dynamic"], default="normal", help="Fit mode: 'normal' fixes map to exact width/height, 'dynamic' expands to fit data.")
     parser.add_argument("--dpi", type=int, default=100, help="Output image DPI")
     parser.add_argument("--title", type=str, default="", help="Map title")
-    
+
     # Colors
     parser.add_argument("--bg-color", type=str, default="#e0f3f8", help="Background color (ocean/empty area)")
     parser.add_argument("--map-fill", type=str, default="#fefee9", help="Map polygon fill color")
@@ -679,7 +753,7 @@ def main():
     parser.add_argument("--label-color", type=str, default="black", help="Label text color")
     parser.add_argument("--label-outline", type=str, default="white", help="Label outline color")
     parser.add_argument("--tick-color", type=str, default="black", help="Axis tick and label color")
-    
+
     # Map Points
     parser.add_argument("--map-point-color", type=str, default="#95a5a6", help="Map data points color")
     parser.add_argument("--map-point-size", type=float, default=4.0, help="Map data points size")
@@ -692,9 +766,9 @@ def main():
     parser.add_argument("--no-labels", dest="show_labels", action="store_false", help="Hide labels for generated points")
     parser.add_argument("--no-axis-ticks", dest="show_axis_ticks", action="store_false", help="Hide lat/lon axis ticks")
     parser.add_argument("--dark-mode", action="store_true", help="Use dark mode color scheme")
-    
+
     args = parser.parse_args()
-    
+
     if args.dark_mode:
         if args.bg_color == "#e0f3f8": args.bg_color = "#1a252c"
         if args.map_fill == "#fefee9": args.map_fill = "#2d3436"
@@ -708,18 +782,18 @@ def main():
         if args.map_label_outline == "white": args.map_label_outline = "#2d3436" # outline matches land to hide it
         if args.water_label_color == "#95c5d8": args.water_label_color = "#2c3e50"
         if args.map_label_size == 15.0: args.map_label_size = 11.0
-    
+
     # Find geojson if not specified
     geojson_path = args.geojson
     if not geojson_path or not os.path.exists(geojson_path):
         print(f"Warning: Base map geojson file not found at {geojson_path}. Map may not render background.")
-            
-            
+
+
     # Generate or Load points
     points = []
     groups_present = set()
     group_colors = {}
-    
+
     if args.csv:
         print(f"Loading points from {args.csv}...")
         with open(args.csv, newline='', encoding='utf-8') as f:
@@ -729,11 +803,11 @@ def main():
             lon_col = args.csv_lon if args.csv_lon else next((h for h in reader.fieldnames if h.lower() in ('lon', 'longitude', 'lng')), None)
             lbl_col = args.csv_label if args.csv_label else next((h for h in reader.fieldnames if h.lower() in ('label', 'name', 'site', 'title')), None)
             grp_col = args.csv_group if args.csv_group else next((h for h in reader.fieldnames if h.lower() in ('group', 'category', 'type')), None)
-            
+
             if not lat_col or not lon_col:
                 print("Error: Could not determine latitude and longitude columns in CSV.")
                 sys.exit(1)
-                
+
             for row in reader:
                 try:
                     lat = float(row[lat_col])
@@ -753,7 +827,7 @@ def main():
             if args.lat_max is None: args.lat_max = max(lats)
             if args.lon_min is None: args.lon_min = min(lons)
             if args.lon_max is None: args.lon_max = max(lons)
-            
+
         if groups_present:
             cmap = cm.get_cmap('Set3')
             colors = [matplotlib.colors.to_hex(cmap(i/11.0)) for i in range(12)]
@@ -762,7 +836,7 @@ def main():
     else:
         if args.seed is not None:
             random.seed(args.seed)
-            
+
         if args.lat_min is None or args.lat_max is None or args.lon_min is None or args.lon_max is None:
             center_lat = random.uniform(-40, 50)
             center_lon = random.uniform(-100, 100)
@@ -775,7 +849,7 @@ def main():
             print(f"Random region selected: Lat [{args.lat_min:.2f}, {args.lat_max:.2f}], Lon [{args.lon_min:.2f}, {args.lon_max:.2f}]")
         points = generate_points(args.num_points, args.lat_min, args.lat_max, args.lon_min, args.lon_max)
 
-    
+
     # Plot
     plot_map(points, geojson_path, args, group_colors)
 
