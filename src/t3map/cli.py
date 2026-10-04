@@ -5,11 +5,10 @@ import csv
 import matplotlib.cm as cm
 import matplotlib.lines as mlines
 import random
-import glob
 import sys
 import math
-import io
-from PIL import Image
+import numpy as np
+from shapely.geometry import shape, box
 import matplotlib
 # Use Agg backend for headless environments
 matplotlib.use('Agg')
@@ -20,7 +19,6 @@ from matplotlib.path import Path
 from matplotlib.patches import PathPatch
 from matplotlib.transforms import Bbox
 from matplotlib.offsetbox import OffsetImage, AnnotationBbox
-import textwrap
 import textwrap
 
 def generate_points(n, lat_min, lat_max, lon_min, lon_max):
@@ -37,10 +35,14 @@ def generate_points(n, lat_min, lat_max, lon_min, lon_max):
 MERCATOR_MAX = 20037508.34
 
 def lonlat_to_merc(lon, lat):
+    lon = np.asarray(lon)
+    lat = np.asarray(lat)
     x = lon * MERCATOR_MAX / 180.0
-    lat = max(-89.9, min(89.9, lat))
-    y = math.log(math.tan((90.0 + lat) * math.pi / 360.0)) / (math.pi / 180.0)
+    lat = np.clip(lat, -89.9, 89.9)
+    y = np.log(np.tan((90.0 + lat) * np.pi / 360.0)) / (np.pi / 180.0)
     y = y * MERCATOR_MAX / 180.0
+    if lon.ndim == 0:
+        return float(x), float(y)
     return x, y
 
 def merc_to_lonlat(x, y):
@@ -56,28 +58,11 @@ def get_feature_bbox(feature):
     geom = feature.get("geometry")
     if not geom:
         return None
-    
-    coords = geom.get("coordinates", [])
-    if not coords:
+    try:
+        s = shape(geom)
+        return s.bounds
+    except Exception:
         return None
-        
-    def extract_coords(c):
-        if not c:
-            return []
-        if isinstance(c[0], (int, float)):
-            return [c]
-        flat = []
-        for sub in c:
-            flat.extend(extract_coords(sub))
-        return flat
-
-    flat_coords = extract_coords(coords)
-    if not flat_coords:
-        return None
-    
-    lons = [c[0] for c in flat_coords]
-    lats = [c[1] for c in flat_coords]
-    return (min(lons), min(lats), max(lons), max(lats))
 
 def create_polygon_patch(coords, facecolor, edgecolor, linewidth, alpha, zorder=1):
     vertices = []
@@ -85,7 +70,9 @@ def create_polygon_patch(coords, facecolor, edgecolor, linewidth, alpha, zorder=
     for ring in coords:
         if not ring:
             continue
-        proj_ring = [lonlat_to_merc(pt[0], pt[1]) for pt in ring]
+        ring_arr = np.array(ring)
+        x, y = lonlat_to_merc(ring_arr[:, 0], ring_arr[:, 1])
+        proj_ring = np.column_stack((x, y)).tolist()
         vertices.extend(proj_ring)
         ring_codes = [Path.LINETO] * len(proj_ring)
         ring_codes[0] = Path.MOVETO
@@ -149,31 +136,28 @@ def plot_geojson_layer(geojson_path, view_bbox, ax, args, merc_bounds, layer_typ
                         # Add independent borders using ax.plot for 100% reliability
                         for ring in poly_coords:
                             if not ring: continue
-                            proj_ring = [lonlat_to_merc(pt[0], pt[1]) for pt in ring]
-                            x = [pt[0] for pt in proj_ring]
-                            y = [pt[1] for pt in proj_ring]
+                            ring_arr = np.array(ring)
+                            x, y = lonlat_to_merc(ring_arr[:, 0], ring_arr[:, 1])
                             ax.plot(x, y, color=args.map_border, linewidth=args.border_width, alpha=0.8, zorder=3)
                     elif layer_type == "water":
                         fill_res = create_polygon_patch(poly_coords, 'none', 'none', 0, 0.0, zorder=0)
                         if fill_res:
                             paths.append(fill_res[1])
             elif gtype == "LineString" and is_river:
-                merc_coords = [lonlat_to_merc(c[0], c[1]) for c in coords]
-                is_vis = any(merc_min_x <= c[0] <= merc_max_x and merc_min_y <= c[1] <= merc_max_y for c in merc_coords)
+                c_arr = np.array(coords)
+                x, y = lonlat_to_merc(c_arr[:, 0], c_arr[:, 1])
+                is_vis = np.any((x >= merc_min_x) & (x <= merc_max_x) & (y >= merc_min_y) & (y <= merc_max_y))
                 if is_vis:
-                    x = [c[0] for c in merc_coords]
-                    y = [c[1] for c in merc_coords]
                     ax.plot(x, y, color=args.bg_color, linewidth=1.5, zorder=2)
-                    paths.append(Path(merc_coords))
+                    paths.append(Path(np.column_stack((x, y))))
             elif gtype == "MultiLineString" and is_river:
                 for line_coords in coords:
-                    merc_coords = [lonlat_to_merc(c[0], c[1]) for c in line_coords]
-                    is_vis = any(merc_min_x <= c[0] <= merc_max_x and merc_min_y <= c[1] <= merc_max_y for c in merc_coords)
+                    c_arr = np.array(line_coords)
+                    x, y = lonlat_to_merc(c_arr[:, 0], c_arr[:, 1])
+                    is_vis = np.any((x >= merc_min_x) & (x <= merc_max_x) & (y >= merc_min_y) & (y <= merc_max_y))
                     if is_vis:
-                        x = [c[0] for c in merc_coords]
-                        y = [c[1] for c in merc_coords]
                         ax.plot(x, y, color=args.bg_color, linewidth=1.5, zorder=2)
-                        paths.append(Path(merc_coords))
+                        paths.append(Path(np.column_stack((x, y))))
                         
             # Check actual visibility
             view_bbox_merc = Bbox.from_extents(merc_min_x, merc_min_y, merc_max_x, merc_max_y)
@@ -188,14 +172,20 @@ def plot_geojson_layer(geojson_path, view_bbox, ax, args, merc_bounds, layer_typ
                 best_seg = None
                 for p in paths:
                     verts = p.vertices
-                    for i in range(len(verts)-1):
-                        p1, p2 = verts[i], verts[i+1]
-                        if (merc_min_x <= p1[0] <= merc_max_x and merc_min_y <= p1[1] <= merc_max_y) or \
-                           (merc_min_x <= p2[0] <= merc_max_x and merc_min_y <= p2[1] <= merc_max_y):
-                            seg_len = math.hypot(p2[0]-p1[0], p2[1]-p1[1])
-                            if seg_len > best_len:
-                                best_len = seg_len
-                                best_seg = (p1, p2)
+                    if len(verts) < 2: continue
+                    x1, y1 = verts[:-1, 0], verts[:-1, 1]
+                    x2, y2 = verts[1:, 0], verts[1:, 1]
+                    
+                    in_bnds = ((x1 >= merc_min_x) & (x1 <= merc_max_x) & (y1 >= merc_min_y) & (y1 <= merc_max_y)) | \
+                              ((x2 >= merc_min_x) & (x2 <= merc_max_x) & (y2 >= merc_min_y) & (y2 <= merc_max_y))
+                              
+                    if not np.any(in_bnds): continue
+                    
+                    dists = np.where(in_bnds, np.hypot(x2 - x1, y2 - y1), 0)
+                    max_idx = np.argmax(dists)
+                    if dists[max_idx] > best_len:
+                        best_len = dists[max_idx]
+                        best_seg = (verts[max_idx], verts[max_idx+1])
                 
                 if best_seg and best_len > (merc_max_x - merc_min_x) * 0.02:
                     p1, p2 = best_seg
@@ -216,12 +206,12 @@ def plot_geojson_layer(geojson_path, view_bbox, ax, args, merc_bounds, layer_typ
                 best_min_vx = best_max_vx = best_min_vy = best_max_vy = 0
                 
                 for p in paths:
-                    vx = [v[0] for v in p.vertices]
-                    vy = [v[1] for v in p.vertices]
-                    if not vx or not vy: continue
+                    if len(p.vertices) == 0: continue
+                    vx = p.vertices[:, 0]
+                    vy = p.vertices[:, 1]
                     
-                    p_min_x, p_max_x = min(vx), max(vx)
-                    p_min_y, p_max_y = min(vy), max(vy)
+                    p_min_x, p_max_x = np.min(vx), np.max(vx)
+                    p_min_y, p_max_y = np.min(vy), np.max(vy)
                     
                     p_min_vx = max(merc_min_x, p_min_x)
                     p_max_vx = min(merc_max_x, p_max_x)
@@ -255,36 +245,42 @@ def plot_geojson_layer(geojson_path, view_bbox, ax, args, merc_bounds, layer_typ
                 target_mx = (min_vx + max_vx) / 2.0
                 target_my = (min_vy + max_vy) / 2.0
                 
-                valid_pts = []
-                invalid_pts = []
-                for ix in range(20):
-                    for iy in range(20):
-                        px = min_vx + (max_vx - min_vx) * (ix / 19.0)
-                        py = min_vy + (max_vy - min_vy) * (iy / 19.0)
-                        if best_path.contains_point((px, py)):
-                            valid_pts.append((px, py))
-                        else:
-                            invalid_pts.append((px, py))
-                            
+                IX, IY = np.meshgrid(np.linspace(0, 1, 20), np.linspace(0, 1, 20))
+                px = min_vx + (max_vx - min_vx) * IX.flatten()
+                py = min_vy + (max_vy - min_vy) * IY.flatten()
+                pts = np.column_stack((px, py))
+                
+                contains = best_path.contains_points(pts)
+                valid_pts = pts[contains]
+                invalid_pts = pts[~contains]
+                
                 best_pt = None
-                if valid_pts:
-                    max_score = -float('inf')
-                    for vx, vy in valid_pts:
-                        if invalid_pts:
-                            dist_to_inv = min((vx - ix)**2 + (vy - iy)**2 for ix, iy in invalid_pts)
-                        else:
-                            dist_to_inv = float('inf')
-                            
-                        dist_to_edge = min((vx - min_vx)**2, (vx - max_vx)**2, (vy - min_vy)**2, (vy - max_vy)**2)
-                        min_safe_dist = min(dist_to_inv, dist_to_edge)
+                if len(valid_pts) > 0:
+                    vx = valid_pts[:, 0]
+                    vy = valid_pts[:, 1]
+                    
+                    if len(invalid_pts) > 0:
+                        ix_pts = invalid_pts[:, 0]
+                        iy_pts = invalid_pts[:, 1]
+                        diff_x = vx[:, np.newaxis] - ix_pts
+                        diff_y = vy[:, np.newaxis] - iy_pts
+                        dist_sq_to_inv = np.min(diff_x**2 + diff_y**2, axis=1)
+                    else:
+                        dist_sq_to_inv = np.full(len(valid_pts), float('inf'))
                         
-                        # Maximize safety distance, gently penalize being far from bounding box center
-                        center_dist = (vx - target_mx)**2 + (vy - target_my)**2
-                        score = min_safe_dist - center_dist * 0.05
-                        
-                        if score > max_score:
-                            max_score = score
-                            best_pt = (vx, vy)
+                    dist_sq_to_edge = np.minimum.reduce([
+                        (vx - min_vx)**2, 
+                        (vx - max_vx)**2, 
+                        (vy - min_vy)**2, 
+                        (vy - max_vy)**2
+                    ])
+                    
+                    min_safe_dist = np.minimum(dist_sq_to_inv, dist_sq_to_edge)
+                    center_dist = (vx - target_mx)**2 + (vy - target_my)**2
+                    scores = min_safe_dist - center_dist * 0.05
+                    
+                    best_idx = np.argmax(scores)
+                    best_pt = (vx[best_idx], vy[best_idx])
                 
                 anchor_mx, anchor_my = target_mx, target_my
                 if best_pt:
@@ -362,16 +358,16 @@ def plot_geojson_layer(geojson_path, view_bbox, ax, args, merc_bounds, layer_typ
                                       color=args.map_label_color, ha='center', va='top', zorder=6, clip_on=True)
                         txt.set_path_effects([PathEffects.withStroke(linewidth=1.5, foreground=args.bg_color)])
             elif gtype == "LineString" and layer_type == "feature":
-                merc_coords = [lonlat_to_merc(c[0], c[1]) for c in coords]
-                is_vis = any(merc_min_x <= c[0] <= merc_max_x and merc_min_y <= c[1] <= merc_max_y for c in merc_coords)
+                c_arr = np.array(coords)
+                x, y = lonlat_to_merc(c_arr[:, 0], c_arr[:, 1])
+                is_vis = np.any((x >= merc_min_x) & (x <= merc_max_x) & (y >= merc_min_y) & (y <= merc_max_y))
                 if is_vis:
-                    x = [c[0] for c in merc_coords]
-                    y = [c[1] for c in merc_coords]
                     ax.plot(x, y, color=args.tick_color, linewidth=1.0, linestyle='--', alpha=0.4, zorder=5)
                     
                     if name:
-                        mid_idx = len(merc_coords) // 2
-                        p1, p2 = merc_coords[mid_idx-1], merc_coords[mid_idx]
+                        mid_idx = len(x) // 2
+                        p1 = (x[mid_idx-1], y[mid_idx-1])
+                        p2 = (x[mid_idx], y[mid_idx])
                         mid_x = (p1[0] + p2[0]) / 2.0
                         mid_y = (p1[1] + p2[1]) / 2.0
                         angle = math.degrees(math.atan2(p2[1]-p1[1], p2[0]-p1[0]))

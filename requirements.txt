@@ -1,4 +1,3 @@
 matplotlib
-Pillow
-pyproj
-adjustText
+numpy
+shapely
